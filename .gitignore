@@ -11,3 +11,4 @@
 /chess_games_10k.pgn
 /.env
 /cnn/chess_v3/wandb/
+/.idea/

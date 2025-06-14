@@ -1,0 +1,56 @@
+# Chess LLM Training Requirements
+# Install with: pip install -r requirements.txt
+
+# Core ML libraries
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.10.0
+peft>=0.4.0
+bitsandbytes>=0.39.0
+accelerate>=0.20.0
+sentencepiece
+
+# Chess libraries
+#chess>=1.999
+#python-chess>=1.999
+chess>=1.11.2
+python-chess
+
+# Data processing
+pandas>=1.5.0
+numpy>=1.24.0
+requests>=2.28.0
+
+# Training and monitoring
+wandb>=0.15.0
+tensorboard>=2.12.0
+scikit-learn>=1.3.0
+
+# Utilities
+tqdm>=4.65.0
+pathlib~=1.0.1
+json5>=0.9.0
+
+# Optional: Jupyter for experimentation
+jupyter>=1.0.0
+ipywidgets>=8.0.0
+
+# For PGN processing
+#pgn-extract
+
+# Web scraping for data collection
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# For optimized inference
+optimum>=1.8.0
+auto-gptq>=0.2.0
+
+# Development tools
+black>=23.0.0
+flake8>=6.0.0
+pytest>=7.0.0
+ipython~=9.3.0
+python-dotenv~=1.1.0
+torchinfo~=1.8.0
+tensorflow~=2.19.0
