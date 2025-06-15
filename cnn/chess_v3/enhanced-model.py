@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
+INPUT_CHANNELS = 20 #0-6 white pieces with light/dark bishop distinction, 7-13 same for black, 14-17 castling right, 18 turn to move, 19 check state
 
 class ResidualBlock(nn.Module):
     """
@@ -228,7 +229,7 @@ class EnhancedChessCNN(nn.Module):
 
     def __init__(
             self,
-            input_channels=19,
+            input_channels=INPUT_CHANNELS,
             board_size=8,
             conv_filters=[64, 128, 256],
             fc_layers=[512, 256],
@@ -341,7 +342,10 @@ class EnhancedChessCNN(nn.Module):
             x = x_reshaped.transpose(1, 2).view(batch_size, channels, height, width)
 
         # Flatten
-        x = x.view(x.size(0), -1)
+        #can't run x = x.view(x.size(0), -1) because of:
+        # view size is not compatible with input tensor's size and stride (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
+        # so might also write x = x.contiguous().view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
 
         # Fully connected layers
         for layer in self.fc_layers_list:
@@ -376,9 +380,9 @@ class ModelValidator:
         }
 
         # Check input channels
-        if config['input_channels'] != 19:
+        if config['input_channels'] != INPUT_CHANNELS:
             validation_results['warnings'].append(
-                f"Non-standard input channels: {config['input_channels']}. Chess typically uses 19 channels."
+                f"Non-standard input channels: {config['input_channels']}. Chess typically uses {INPUT_CHANNELS} channels."
             )
 
         # Check board size
@@ -396,7 +400,7 @@ class ModelValidator:
             )
 
         # Check dropout rate
-        if not 0.0 <= config['dropout_rate'] <= 0.8:
+        if not 0.0 <= config['dropout_rate'] <= 0.5:
             validation_results['warnings'].append(
                 f"Dropout rate {config['dropout_rate']} may be too high or low. Recommended: 0.1-0.5"
             )
@@ -545,7 +549,7 @@ class WandBIntegratedTrainer:
                 verbose=1,
                 col_names=["output_size", "num_params", "mult_adds"],
                 row_settings=["depth"]
-            )[12]
+            )
 
             # Log summary to W&B
             wandb.log({
@@ -783,7 +787,7 @@ def create_enhanced_chess_model_with_validation(config=None):
     """
     if config is None:
         config = {
-            'input_channels': 19,
+            'input_channels': INPUT_CHANNELS,
             'board_size': 8,
             'conv_filters': [64, 128, 256],
             'fc_layers': [512, 256],
