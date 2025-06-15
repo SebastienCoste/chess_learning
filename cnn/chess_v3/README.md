@@ -303,7 +303,7 @@ This chess CNN represents a sophisticated approach to game AI, combining modern 
 
 <div style="text-align: center">⁂</div>
 
-[^1]: enhanced-model.py
+[^1]: train_model.py
 
-[^2]: architecture.txt
+[^2]: architecture.md
 
