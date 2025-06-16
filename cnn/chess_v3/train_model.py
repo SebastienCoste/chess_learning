@@ -186,7 +186,7 @@ class Trainer:
             "validation/config_valid": validation_results['valid'],
             "validation/num_warnings": len(validation_results['warnings']),
             "validation/num_errors": len(validation_results['errors']),
-            "validation/forward_pass_success": test_results['success']
+            "validation/forward_pass_success": test_results['success'],
         })
 
         print("=" * 80)
@@ -200,7 +200,7 @@ class Trainer:
             "train/learning_rate": current_lr,
             "validation/loss": val_loss,
             "step": step
-        }, step=step)
+        })
 
     def train_epoch(self):
         """Train for one epoch with gradient clipping and W&B logging."""
