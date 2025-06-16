@@ -12,3 +12,5 @@
 /.env
 /cnn/chess_v3/wandb/
 /.idea/
+**/*.pkl
+**/*.pgn

@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import math
 
+from cnn.chess_v3.components.config import TRAINING_CONFIG
+
+
 class PositionalEncoding2D(nn.Module):
     """
     2D positional encoding for chess board positions.
@@ -10,6 +13,8 @@ class PositionalEncoding2D(nn.Module):
 
     def __init__(self, channels, height=8, width=8):
         super(PositionalEncoding2D, self).__init__()
+        self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
+        print(f"PositionalEncoding2D is using device {self.device}")
 
         pe = torch.zeros(channels, height, width)
 
@@ -29,4 +34,5 @@ class PositionalEncoding2D(nn.Module):
         self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
+        x = x.to(self.device)
         return x + self.pe[:, :x.size(1), :x.size(2), :x.size(3)]

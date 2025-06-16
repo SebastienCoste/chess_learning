@@ -2,10 +2,13 @@ import chess
 import chess.pgn
 import numpy as np
 import torch
+from setuptools.errors import InvalidConfigError
 from torch.utils.data import Dataset, DataLoader
 import pickle
 import io
 from typing import List, Dict, Tuple
+
+from cnn.chess_v3.components.config import TRAINING_CONFIG
 
 
 class ChessTrainingDataGenerator:
@@ -19,21 +22,8 @@ class ChessTrainingDataGenerator:
         self.skip_opening_moves = skip_opening_moves
         self.skip_endgame_moves = skip_endgame_moves
 
-    def board_to_tensor(self, board: chess.Board) -> np.ndarray:
-        """
-        Convert chess board to 19-channel tensor representation.
-
-        Channels 0-5: White pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-        Channels 6-11: Black pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-        Channels 12-15: Castling rights
-        Channel 16: En passant target
-        Channel 17: Move count (normalized)
-        Channel 18: Turn to move (1=white, 0=black)
-        """
-        tensor = np.zeros((19, 8, 8), dtype=np.float32)
-
         # Piece mapping for channels 0-11
-        piece_map = {
+        self.piece_map = {
             (chess.PAWN, chess.WHITE): 0,
             (chess.KNIGHT, chess.WHITE): 1,
             (chess.BISHOP, chess.WHITE): 2,
@@ -47,12 +37,26 @@ class ChessTrainingDataGenerator:
             (chess.QUEEN, chess.BLACK): 10,
             (chess.KING, chess.BLACK): 11,
         }
+    def board_to_tensor(self, board: chess.Board) -> np.ndarray:
+        """
+        Convert chess board to 19-channel tensor representation.
+
+        Channels 0-5: White pieces (Pawn, Knight, Bishop, Rook, Queen, King)
+        Channels 6-11: Black pieces (Pawn, Knight, Bishop, Rook, Queen, King)
+        Channels 12-15: Castling rights
+        Channel 16: En passant target
+        Channel 17: Move count (normalized)
+        Channel 18: Turn to move (1=white, 0=black)
+        """
+        tensor = np.zeros((19, 8, 8), dtype=np.float32)
+
+
 
         # Fill piece channels
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece:
-                channel = piece_map[(piece.piece_type, piece.color)]
+                channel = self.piece_map[(piece.piece_type, piece.color)]
                 row = 7 - (square // 8)  # Convert to array indexing
                 col = square % 8
                 tensor[channel, row, col] = 1.0
@@ -86,10 +90,10 @@ class ChessTrainingDataGenerator:
         """Convert move to index in 4096-dimensional output vector."""
         return move.from_square * 64 + move.to_square
 
-    def process_pgn_string(self, pgn_string: str) -> List[Dict]:
+    def process_pgn_string(self, game) -> List[Dict]:
         """Process PGN string and extract training positions."""
-        pgn_io = io.StringIO(pgn_string)
-        game = chess.pgn.read_game(pgn_io)
+        # pgn_io = io.StringIO(pgn_string)
+        # game = chess.pgn.read_game(pgn_io)
 
         if not game:
             return []
@@ -98,12 +102,13 @@ class ChessTrainingDataGenerator:
         try:
             white_elo = int(game.headers.get("WhiteElo", 0))
             black_elo = int(game.headers.get("BlackElo", 0))
-            if white_elo < self.min_elo or black_elo < self.min_elo:
-                print(f"Skipping game: ELO too low (W:{white_elo}, B:{black_elo})")
-                return []
+        #     if white_elo < self.min_elo or black_elo < self.min_elo:
+        #         print(f"Skipping game: ELO too low (W:{white_elo}, B:{black_elo})")
+        #         return []
         except (ValueError, TypeError):
             print("Could not parse ELO ratings")
-            return []
+            white_elo = 0
+            black_elo = 0
 
         training_data = []
         board = game.board()
@@ -156,8 +161,9 @@ class ChessDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        input_tensor = torch.FloatTensor(item['input'])
-        output_tensor = torch.FloatTensor(item['output'])
+        #if sent to CUDA, DataLoader.pin_memory needs to be set to false, because it's used to optimize the migration from CPU to CUDA
+        input_tensor = torch.FloatTensor(item['input'])#.to('cuda' if TRAINING_CONFIG["device"] == "cuda" else 'cpu')
+        output_tensor = torch.FloatTensor(item['output'])#.to('cuda' if TRAINING_CONFIG["device"] == "cuda" else 'cpu')
         return input_tensor, output_tensor
 
 
@@ -188,7 +194,8 @@ def create_chess_data_loaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
     )
 
     val_loader = DataLoader(
@@ -197,34 +204,58 @@ def create_chess_data_loaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
+        # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
     )
 
     return train_loader, val_loader
 
+def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
+    """Load all games from the PGN file"""
+    games = []
+    with open(pgn_file, 'r', encoding='utf-8') as f:
+        while len(games) < max_games:
+            try:
+                if len(games) % 100 == 0:
+                    print(f"Loading game {len(games)}")
+                game = chess.pgn.read_game(f)
+                if game is None:
+                    break
+                games.append(game)
+            except Exception as e:
+                print(f"Error reading game: {e}")
+                continue
+
+    return games
 
 # Example usage
 if __name__ == "__main__":
     # Sample master game
-    sample_pgn = """[Event "World Championship"]
-[Site "London"]
-[Date "2018.11.24"]
-[Round "12"]
-[White "Carlsen, Magnus"]
-[Black "Caruana, Fabiano"]
-[Result "1/2-1/2"]
-[WhiteElo "2835"]
-[BlackElo "2832"]
-
-1. e4 c5 2. Nf3 Nc6 3. Bb5 g6 4. Bxc6 dxc6 5. d3 Bg7 6. h3 Nf6 7. Nc3 O-O 8. Be3 b6 9. Qd2 e5 10. Bh6 Qe7 11. Bxg7 Qxg7 12. O-O-O Rd8 13. Kb1 Rd7 14. Rhe1 Re8 15. h4 h6 16. h5 g5 17. Nh2 Nh7 18. f4 exf4 19. Qxf4 Qxf4 20. Rxf4 Re2 21. Rf2 Re1+ 22. Rxe1 1/2-1/2"""
+    pkl_filename = "minimal_train_data.pkl"
+    max_games = 10
+    print("Loading PGN games...")
+    games = load_pgn_games("./pgn/VachierLagrave.pgn", max_games)
+    print(f"Loaded {len(games)} games")
 
     # Process the game
     generator = ChessTrainingDataGenerator(min_elo=2000)
-    training_data = generator.process_pgn_string(sample_pgn)
 
+    all_training_data = []
+
+    for i, game in enumerate(games):
+        if i % 100 == 0:
+            print(f"Processing game {i + 1}/{len(games)}")
+
+        try:
+            training_data = generator.process_pgn_string(game)
+            all_training_data.extend(training_data)
+        except Exception as e:
+            print(f"Error processing game {i}: {e}")
+            continue
+
+    print(f"Generating {len(all_training_data)} training examples in {pkl_filename}")
     # Save training data
-    with open('chess_training_data.pkl', 'wb') as f:
-        pickle.dump(training_data, f)
+    with open(pkl_filename, 'wb') as f:
+        pickle.dump(all_training_data, f)
 
-    print(f"Generated {len(training_data)} training examples")
-    print(f"Saved to chess_training_data.pkl")
+    print(f"Generated {len(all_training_data)} training examples in {pkl_filename}")

@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from typing import Dict, Tuple, Any
 
-INPUT_CHANNELS = 20
+from cnn.chess_v3.components.config import TRAINING_CONFIG
+
 
 class ModelValidator:
     """
@@ -20,9 +21,9 @@ class ModelValidator:
         }
 
         # Check input channels
-        if config['input_channels'] != INPUT_CHANNELS:
+        if config['input_channels'] != TRAINING_CONFIG["input_channels"]:
             validation_results['warnings'].append(
-                f"Non-standard input channels: {config['input_channels']}. Chess typically uses {INPUT_CHANNELS} channels."
+                f"Non-standard input channels: {config['input_channels']}. Chess typically uses {TRAINING_CONFIG["input_channels"]} channels."
             )
 
         # Check board size
@@ -78,6 +79,7 @@ class ModelValidator:
             test_results['output_shape'] = tuple(output.shape)
 
             # Memory usage (approximate)
+            test_results['device'] = device
             if device == 'cuda':
                 test_results['memory_usage'] = torch.cuda.memory_allocated() / 1024 ** 2  # MB
 

@@ -1,11 +1,13 @@
 import torch.nn.functional as F
 import torch.nn as nn
-from model_validator import INPUT_CHANNELS
-from mish_activation import MishActivation
-from residual_block import ResidualBlock
-from spatial_attention import SpatialAttention
-from chess_transformer_block import ChessTransformerBlock
-from positional_encoding import PositionalEncoding2D
+import torch
+
+from cnn.chess_v3.components.config import TRAINING_CONFIG
+from cnn.chess_v3.components.mish_activation import MishActivation
+from cnn.chess_v3.components.residual_block import ResidualBlock
+from cnn.chess_v3.components.spatial_attention import SpatialAttention
+from cnn.chess_v3.components.chess_transformer_block import ChessTransformerBlock
+from cnn.chess_v3.components.positional_encoding import PositionalEncoding2D
 
 def get_activation_function(activation_name='gelu'):
     """Factory function to get activation functions."""
@@ -26,8 +28,8 @@ class EnhancedChessCNN(nn.Module):
 
     def __init__(
             self,
-            input_channels=INPUT_CHANNELS,
-            board_size=8,
+            input_channels=TRAINING_CONFIG["input_channels"],
+            board_size=TRAINING_CONFIG["board_size"],
             conv_filters=[64, 128, 256],
             fc_layers=[512, 256],
             dropout_rate=0.3,
@@ -36,9 +38,13 @@ class EnhancedChessCNN(nn.Module):
             use_attention=True,
             use_transformer_blocks=True,
             num_transformer_layers=2,
-            transformer_heads=8
+            transformer_heads=8,
+            kernel_size = TRAINING_CONFIG["kernel_size"],
     ):
         super(EnhancedChessCNN, self).__init__()
+        self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
+        self.to(self.device)  # Move entire model to CUDA immediately
+        print(f"EnhancedChessCNN is initialized using device {self.device}")
 
         self.input_channels = input_channels
         self.board_size = board_size
@@ -48,6 +54,7 @@ class EnhancedChessCNN(nn.Module):
         self.batch_norm = batch_norm
         self.use_attention = use_attention
         self.use_transformer_blocks = use_transformer_blocks
+        self.kernel_size = kernel_size
 
         # Get activation function
         activation_fn = get_activation_function(activation)
@@ -61,10 +68,12 @@ class EnhancedChessCNN(nn.Module):
 
         for filters in conv_filters:
             block = ResidualBlock(
-                in_channels, filters,
+                in_channels,
+                filters,
                 activation_fn=activation_fn,
                 batch_norm=batch_norm,
-                dropout_rate=dropout_rate
+                dropout_rate=dropout_rate,
+                kernel_size=self.kernel_size,
             )
             self.conv_layers.append(block)
 

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from setuptools.errors import InvalidConfigError
 from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau
 import wandb
 from torchinfo import summary
@@ -8,15 +9,16 @@ from typing import Dict
 import os
 from dotenv import load_dotenv
 import pickle
+
+from cnn.chess_v3.components.config import TRAINING_CONFIG
 from generate_data import create_chess_data_loaders
 
 from cnn.chess_v3.components.model_validator import ModelValidator
-from cnn.chess_v3.components.model_validator import INPUT_CHANNELS
 from cnn.chess_v3.components.early_stopping import EarlyStopping
 from cnn.chess_v3.components.chess_cnn import EnhancedChessCNN
 
 
-class WandBIntegratedTrainer:
+class Trainer:
     """
     Enhanced trainer with comprehensive W&B integration, model summaries, and validation.
     """
@@ -203,10 +205,28 @@ class WandBIntegratedTrainer:
     def train_epoch(self):
         """Train for one epoch with gradient clipping and W&B logging."""
         self.model.train()
+        if TRAINING_CONFIG["device"] == "cuda":
+            self.model = self.model.to('cuda')  # Redundant but safe
         total_loss = 0.0
         num_batches = 0
 
+        # Get model device dynamically
+        device = next(self.model.parameters()).device
+
+        if not str(device).__contains__(TRAINING_CONFIG["device"]):
+            raise Exception(f"next(self.model.parameters()).device should be {TRAINING_CONFIG["device"]} but is {device}")
+
         for batch_idx, (data, target) in enumerate(self.train_loader):
+            if TRAINING_CONFIG["device"] == "cuda":
+                # Data should be already on CUDA from DataLoader
+                data = data.to(device)
+                target = target.to(device)
+            if not str(data.device).__contains__(TRAINING_CONFIG["device"]):
+                print(f"Data device not {TRAINING_CONFIG["device"]}: {data.device}")  # Should be cuda:0
+            if not str(target.device).__contains__(TRAINING_CONFIG["device"]):
+                print(f"Target device not {TRAINING_CONFIG["device"]}: {target.device}")  # Should be cuda:0
+            if not str(next(model.parameters()).device).__contains__(TRAINING_CONFIG["device"]):
+                print(f"Model device not {TRAINING_CONFIG["device"]}: {next(model.parameters()).device}")  # Should be cuda:0
             self.optimizer.zero_grad()
 
             # Forward pass
@@ -223,7 +243,7 @@ class WandBIntegratedTrainer:
             num_batches += 1
 
             # Log batch-level metrics occasionally
-            if batch_idx % 100 == 0:
+            if batch_idx % 25 == 0 or batch_idx == 0:
                 wandb.log({
                     "train/batch_loss": loss.item(),
                     "train/batch_idx": batch_idx
@@ -234,11 +254,16 @@ class WandBIntegratedTrainer:
     def validate(self):
         """Validate the model."""
         self.model.eval()
+        device = next(self.model.parameters()).device
+        if not str(device).__contains__(TRAINING_CONFIG["device"]):
+            raise Exception(f"next(self.model.parameters()).device is {device} but should be {TRAINING_CONFIG['device']}")
         total_loss = 0.0
         num_batches = 0
 
         with torch.no_grad():
             for data, target in self.val_loader:
+                data = data.to(device)
+                target = target.to(device)
                 output = self.model(data)
                 loss = self.criterion(output, target)
                 total_loss += loss.item()
@@ -291,7 +316,7 @@ class WandBIntegratedTrainer:
                 break
 
             # Progress reporting
-            if (epoch + 1) % 10 == 0 or epoch == 0:
+            if True or (epoch + 1) % 10 == 0 or epoch == 0:
                 print(f"📊 Epoch {epoch + 1:3d}/{num_epochs}")
                 print(f"   • Train Loss: {train_loss:.6f}")
                 print(f"   • Val Loss:   {val_loss:.6f}")
@@ -321,10 +346,8 @@ class WandBIntegratedTrainer:
             'learning_rates': self.learning_rates
         }
 
-
-
 # Load processed training data
-def load_chess_training_data(filename='chess_training_data.pkl'):
+def load_chess_training_data(filename):
     with open(filename, 'rb') as f:
         training_data = pickle.load(f)
     return training_data
@@ -335,7 +358,7 @@ def create_enhanced_chess_model_with_validation(config=None):
     """
     if config is None:
         config = {
-            'input_channels': INPUT_CHANNELS,
+            'input_channels': TRAINING_CONFIG['input_channels'],
             'board_size': 8,
             'conv_filters': [64, 128, 256],
             'fc_layers': [512, 256],
@@ -346,14 +369,22 @@ def create_enhanced_chess_model_with_validation(config=None):
             'use_transformer_blocks': True,
             'num_transformer_layers': 2,
             'transformer_heads': 8,
-            'num_epochs': 200,
         }
 
     print("🏗️  CREATING ENHANCED CHESS CNN MODEL")
     print("=" * 80)
 
     # Create model
-    model = EnhancedChessCNN(**config)
+    if TRAINING_CONFIG["device"] == "cuda" and not torch.cuda.is_available():
+        raise Exception("CUDA required in TRAINING_CONFIG but not available")
+    model = EnhancedChessCNN(**config).to('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else "cpu")
+    print(f"EnhancedChessCNN is using device {next(model.parameters()).device}")
+    if TRAINING_CONFIG["device"] == "cuda":
+        if not all(param.device.type == 'cuda' for param in model.parameters()):
+            raise Exception(f"CUDA device not configured in a parameter but CUDA Expected.")
+        if not all(buffer.device.type == 'cuda' for buffer in model.buffers()):
+            raise Exception(f"CUDA device not configured in a buffer but CUDA Expected.")
+        print(f"EnhancedChessCNN Parameters and buffers validated with CUDA")
 
     # Validate configuration
     validator = ModelValidator()
@@ -381,6 +412,7 @@ def create_enhanced_chess_model_with_validation(config=None):
 if __name__ == "__main__":
     # Install required packages (uncomment if needed)
     # !pip install wandb torchinfo
+    pkl_file = "minimal_train_data.pkl" #full training data: 'chess_training_data.pkl'
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
     print("=" * 80)
@@ -389,7 +421,8 @@ if __name__ == "__main__":
     model, config = create_enhanced_chess_model_with_validation()
 
     # Example training setup (requires actual data loaders)
-    training_data = load_chess_training_data('chess_training_data.pkl')
+    training_data = load_chess_training_data(pkl_file)
+    print(f"Loaded training data from {pkl_file}")
     train_loader, val_loader = create_chess_data_loaders(
         training_data,
         train_split=0.8,
@@ -398,13 +431,13 @@ if __name__ == "__main__":
     )
 
     # Initialize trainer with W&B integration
-    trainer = WandBIntegratedTrainer(
+    trainer = Trainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         config=config,
-        project_name="enhanced-chess-cnn",
-        experiment_name="residual-attention-transformer",
+        project_name=f"chess-cnn",
+        experiment_name=f"run-{pkl_file.replace(".pkl", "")}",
         learning_rate=0.001,
         weight_decay=1e-4,
         scheduler_type='reduce_on_plateau',
@@ -419,7 +452,7 @@ if __name__ == "__main__":
 
     if train_loader is not None and val_loader is not None:
         # Train the model
-        training_history = trainer.train(num_epochs=200)
+        training_history = trainer.train(num_epochs=TRAINING_CONFIG["num_epoch"])
         # Close W&B run
         wandb.finish()
     else:
