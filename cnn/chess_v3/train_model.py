@@ -11,11 +11,14 @@ from typing import Dict
 import os
 from dotenv import load_dotenv
 import pickle
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+import torch
+from torch.amp import autocast, GradScaler
 
 from cnn.chess_v3.components.WandbLogger import EfficientBatchLogger
 from cnn.chess_v3.components.config import TRAINING_CONFIG
 from generate_data import create_chess_data_loaders
-
 from cnn.chess_v3.components.model_validator import ModelValidator
 from cnn.chess_v3.components.early_stopping import EarlyStopping
 from cnn.chess_v3.components.chess_cnn import EnhancedChessCNN
@@ -58,6 +61,7 @@ class Trainer:
 
         # Log model architecture to W&B
         wandb.watch(self.model, log_freq=100, log="all")
+        self.scaler = GradScaler()  # Add this line for AMP
 
         # Optimizer with weight decay (L2 regularization)
         self.optimizer = optim.AdamW(
@@ -75,6 +79,14 @@ class Trainer:
             self.scheduler = ReduceLROnPlateau(
                 self.optimizer, mode='min', factor=0.2,
                 patience=5, min_lr=1e-7
+            )
+        elif scheduler_type == 'cosine':
+            self.scheduler = LinearWarmupCosineAnnealingLR(
+                self.optimizer,
+                warmup_epochs=TRAINING_CONFIG["cosine"]["warmup_epochs"],
+                max_epochs=200,
+                warmup_start_lr=0.0001,
+                eta_min=TRAINING_CONFIG["cosine"]["eta_min"]
             )
         else:
             self.scheduler = None
@@ -234,16 +246,35 @@ class Trainer:
             if not str(next(model.parameters()).device).__contains__(TRAINING_CONFIG["device"]):
                 print(f"Model device not {TRAINING_CONFIG["device"]}: {next(model.parameters()).device}")  # Should be cuda:0
             self.optimizer.zero_grad()
+            if TRAINING_CONFIG["mixed_precision"]:
+                # --- AMP block starts here ---
+                with autocast(dtype=torch.float16, device_type="cuda"):
+                    output = self.model(data)
+                    loss = self.criterion(output, target)
+                    # Backward pass with gradient scaling
+                self.scaler.scale(loss).backward()
 
-            # Forward pass
-            output = self.model(data)
-            loss = self.criterion(output, target)
+                # Unscale gradients before clipping (recommended)
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-            # Backward pass with gradient clipping
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # Optimizer step with scaler
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # Forward pass
+                output = self.model(data)
+                loss = self.criterion(output, target)
 
-            self.optimizer.step()
+                # Backward pass with gradient clipping
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+            # Scheduler step (if not ReduceLROnPlateau)
+            if self.scheduler and not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step()
+            else:
+                self.optimizer.step()
 
             total_loss += loss.item()
             num_batches += 1
@@ -458,7 +489,7 @@ if __name__ == "__main__":
         experiment_name=f"run-{pkl_file.replace(".pkl", "")}-{TRAINING_CONFIG["version"]}",
         learning_rate=TRAINING_CONFIG["learning_rate"],
         weight_decay=TRAINING_CONFIG["weight_decay"],
-        scheduler_type='reduce_on_plateau',
+        scheduler_type=TRAINING_CONFIG["scheduler_type"],
         early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
     )
 
