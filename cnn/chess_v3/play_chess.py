@@ -13,10 +13,9 @@ import sys
 import os
 import chess
 import chess.engine
-import torch
-import numpy as np
-from pathlib import Path
-import time
+
+from cnn.chess_v3.components.chess_engine import SimpleChessEngine
+
 
 class SimpleChessDisplay:
     """
@@ -111,38 +110,31 @@ class SimpleChessDisplay:
                 sys.exit(0)
 
 
-class SimpleChessEngine:
-    """
-    Simple chess engine interface.
-    This is a placeholder for the full CNN implementation.
-    """
-    
-    def __init__(self, model_path=None):
-        self.model_path = model_path
-        print(f"Loading model from: {model_path}")
-        print("Note: This is a simplified demo. The full implementation")
-        print("would load your trained CNN model here.")
-    
-    def get_model_move(self, board):
-        """Get best move from the model."""
-        # In the full implementation, this would:
-        # 1. Convert board to tensor
-        # 2. Run inference with CNN
-        # 3. Select best legal move
-        
-        # For demo: return a random legal move
-        legal_moves = list(board.legal_moves)
-        if legal_moves:
-            move = np.random.choice(legal_moves)
-            print(f"AI thinking... Selected move: {board.san(move)}")
-            return move
-        return None
+class EnhancedChessDisplay(SimpleChessDisplay):
+    def display_move_analysis(self, engine, board):
+        """Display AI move analysis."""
+        if engine.model is not None:
+            print("\n" + "=" * 40)
+            print("AI MOVE ANALYSIS")
+            print("=" * 40)
+
+            analysis = engine.get_move_analysis(board)
+            if "error" not in analysis:
+                print(f"Position: {analysis['to_move']} to move")
+                print(f"Legal moves: {analysis['legal_moves_count']}")
+                print("\nTop AI predictions:")
+
+                for i, move_info in enumerate(analysis["top_moves"], 1):
+                    print(f"{i}. {move_info['move']} ({move_info['percentage']})")
+            else:
+                print(f"Analysis error: {analysis['error']}")
+
 
 
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(description="Play chess against CNN")
-    parser.add_argument("--model", type=str, help="Path to trained model")
+    parser.add_argument("--model", type=str, help="Path to trained model (e.g. chessMVLv1.pth)")
     parser.add_argument("--color", choices=["white", "black"], default="white",
                        help="Your color")
     parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], 
@@ -153,22 +145,26 @@ def main():
     print("="*50)
     print("CHESS CNN CONSOLE GAME")
     print("="*50)
-    
-    if not args.model:
-        print("No model specified. Using random move generator for demo.")
-        print("To use a trained model, specify --model path/to/model.pth")
+
+    model_path = args.model
+    if not model_path:
+        model_path = input("Enter the path to your model file (e.g., chessMVLv1.pth): ").strip()
+        if not model_path:
+            print("No model specified. Using random move generator for demo.")
+            model_path = None
+
     
     # Initialize components
     board = chess.Board()
-    display = SimpleChessDisplay()
-    engine = SimpleChessEngine(args.model)
+    display = EnhancedChessDisplay()
+    engine = SimpleChessEngine(model_path)
     
     player_color = chess.WHITE if args.color == "white" else chess.BLACK
     
     print(f"\nYou are playing {args.color}")
     print(f"AI difficulty: {args.difficulty}")
     print("Commands: Type moves like 'e4', 'Nf3', or 'quit' to exit")
-    
+    move_count = 0
     # Game loop
     while not board.is_game_over():
         os.system('cls' if os.name == 'nt' else 'clear')  # Clear screen
@@ -180,11 +176,16 @@ def main():
             print("\n👤 Your turn!")
             move = display.get_human_move(board)
             board.push(move)
+            move_count = move_count + 1
         else:
-            # AI turn
-            print("\n🤖 AI is thinking...")
-            #time.sleep(1)  # Simulate thinking time
-            move = engine.get_model_move(board)
+            if move_count < 0:
+                print("\n👤 Play the opening for AI:")
+                move = display.get_human_move(board)
+            else:
+                # AI turn
+                print("\n🤖 AI is thinking...")
+                #time.sleep(1)  # Simulate thinking time
+                move = engine.get_model_move(board)
             if move:
                 board.push(move)
             else:
