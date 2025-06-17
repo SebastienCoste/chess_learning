@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,6 +12,7 @@ import os
 from dotenv import load_dotenv
 import pickle
 
+from cnn.chess_v3.components.WandbLogger import EfficientBatchLogger
 from cnn.chess_v3.components.config import TRAINING_CONFIG
 from generate_data import create_chess_data_loaders
 
@@ -70,7 +73,7 @@ class Trainer:
             self.scheduler = ExponentialLR(self.optimizer, gamma=0.95)
         elif scheduler_type == 'reduce_on_plateau':
             self.scheduler = ReduceLROnPlateau(
-                self.optimizer, mode='min', factor=0.5,
+                self.optimizer, mode='min', factor=0.2,
                 patience=5, min_lr=1e-7
             )
         else:
@@ -202,13 +205,15 @@ class Trainer:
             "step": step
         })
 
-    def train_epoch(self):
+    def train_epoch(self, epoch):
         """Train for one epoch with gradient clipping and W&B logging."""
         self.model.train()
         if TRAINING_CONFIG["device"] == "cuda":
             self.model = self.model.to('cuda')  # Redundant but safe
         total_loss = 0.0
         num_batches = 0
+
+        batch_logger = EfficientBatchLogger(log_frequency=25)
 
         # Get model device dynamically
         device = next(self.model.parameters()).device
@@ -217,6 +222,7 @@ class Trainer:
             raise Exception(f"next(self.model.parameters()).device should be {TRAINING_CONFIG["device"]} but is {device}")
 
         for batch_idx, (data, target) in enumerate(self.train_loader):
+            batch_start_time = time.time()
             if TRAINING_CONFIG["device"] == "cuda":
                 # Data should be already on CUDA from DataLoader
                 data = data.to(device)
@@ -242,12 +248,37 @@ class Trainer:
             total_loss += loss.item()
             num_batches += 1
 
+            batch_time = time.time() - batch_start_time
+            current_lr = self.optimizer.param_groups[0]['lr']
+
+            if batch_idx % 10 == 1:  # Calculate accuracy every 10 batches
+                with torch.no_grad():
+                    pred = output.argmax(dim=1, keepdim=True)
+                    print(f"pred shape: {pred.shape}, target shape: {target.shape}")
+                    pred = output.argmax(dim=1)  # [batch_size, H, W]
+                    correct = pred.eq(target).sum().item()
+                    # correct = pred.eq(target.view_as(pred)).sum().item()
+                    accuracy = 100. * correct / len(data)
+            else:
+                accuracy = None
+
+                # Log batch metrics efficiently
+            batch_logger.log_batch_metrics(
+                batch_idx,
+                loss.item(),
+                accuracy if accuracy else 0.0,
+                current_lr
+            )
+
+            # Additional detailed logging for specific batches
+            if batch_idx % 25 == 0:
+                batch_logger.log_detailed_batch_info(self.model, self.train_loader, batch_idx, epoch, batch_time, loss.item())
             # Log batch-level metrics occasionally
-            if batch_idx % 25 == 0 or batch_idx == 0:
-                wandb.log({
-                    "train/batch_loss": loss.item(),
-                    "train/batch_idx": batch_idx
-                })
+            # if batch_idx % 25 == 0 or batch_idx == 0:
+            #     wandb.log({
+            #         "train/batch_loss": loss.item(),
+            #         "train/batch_idx": batch_idx
+            #     })
 
         return total_loss / num_batches
 
@@ -288,7 +319,7 @@ class Trainer:
 
         for epoch in range(num_epochs):
             # Training
-            train_loss = self.train_epoch()
+            train_loss = self.train_epoch(epoch)
 
             # Validation
             val_loss = self.validate()
@@ -312,7 +343,7 @@ class Trainer:
             # Early stopping check
             if self.early_stopping(val_loss, self.model):
                 print(f"\n🛑 Early stopping triggered at epoch {epoch + 1}")
-                wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1})
+                wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1}, commit=True)
                 break
 
             # Progress reporting
@@ -357,19 +388,7 @@ def create_enhanced_chess_model_with_validation(config=None):
     Factory function to create enhanced chess model with comprehensive validation.
     """
     if config is None:
-        config = {
-            'input_channels': TRAINING_CONFIG['input_channels'],
-            'board_size': 8,
-            'conv_filters': [64, 128, 256],
-            'fc_layers': [512, 256],
-            'dropout_rate': 0.3,
-            'batch_norm': True,
-            'activation': 'gelu',
-            'use_attention': True,
-            'use_transformer_blocks': True,
-            'num_transformer_layers': 2,
-            'transformer_heads': 8,
-        }
+        config = TRAINING_CONFIG["config"]
 
     print("🏗️  CREATING ENHANCED CHESS CNN MODEL")
     print("=" * 80)
@@ -410,9 +429,8 @@ def create_enhanced_chess_model_with_validation(config=None):
 
 # Example usage with comprehensive setup
 if __name__ == "__main__":
-    # Install required packages (uncomment if needed)
-    # !pip install wandb torchinfo
-    pkl_file = "minimal_train_data.pkl" #full training data: 'chess_training_data.pkl'
+    pkl_file = 'chess_training_data.pkl'
+    # pkl_file = "minimal_train_data.pkl" #full training data: 'chess_training_data.pkl'
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
     print("=" * 80)
@@ -426,8 +444,8 @@ if __name__ == "__main__":
     train_loader, val_loader = create_chess_data_loaders(
         training_data,
         train_split=0.8,
-        batch_size=64,  # To be adjusted
-        num_workers=8  # 8 cores, 16 logical cores
+        batch_size= TRAINING_CONFIG["batch_size"],  # To be adjusted
+        num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
     )
 
     # Initialize trainer with W&B integration
@@ -437,11 +455,11 @@ if __name__ == "__main__":
         val_loader=val_loader,
         config=config,
         project_name=f"chess-cnn",
-        experiment_name=f"run-{pkl_file.replace(".pkl", "")}",
-        learning_rate=0.001,
-        weight_decay=1e-4,
+        experiment_name=f"run-{pkl_file.replace(".pkl", "")}-{TRAINING_CONFIG["version"]}",
+        learning_rate=TRAINING_CONFIG["learning_rate"],
+        weight_decay=TRAINING_CONFIG["weight_decay"],
         scheduler_type='reduce_on_plateau',
-        early_stopping_patience=15
+        early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
     )
 
     # Print comprehensive model summary
