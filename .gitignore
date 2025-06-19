@@ -13,5 +13,7 @@
 /cnn/chess_v3/wandb/
 /.idea/
 **/*.pkl
+**/*.pth
 **/*.pgn
 **/*.pyc
+cnn/chess_v3/data/

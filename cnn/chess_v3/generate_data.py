@@ -1,14 +1,15 @@
+import random
+
 import chess
 import chess.pgn
 import numpy as np
 import torch
-from setuptools.errors import InvalidConfigError
 from torch.utils.data import Dataset, DataLoader
 import pickle
-import io
 from typing import List, Dict, Tuple
 
-from cnn.chess_v3.components.config import TRAINING_CONFIG
+from cnn.chess_v3.components.chess_board_utils import board_to_tensor
+from cnn.chess_v3.components.mmap_dataset import convert_pickle_to_memmap
 
 
 class ChessTrainingDataGenerator:
@@ -22,69 +23,6 @@ class ChessTrainingDataGenerator:
         self.skip_opening_moves = skip_opening_moves
         self.skip_endgame_moves = skip_endgame_moves
 
-        # Piece mapping for channels 0-11
-        self.piece_map = {
-            (chess.PAWN, chess.WHITE): 0,
-            (chess.KNIGHT, chess.WHITE): 1,
-            (chess.BISHOP, chess.WHITE): 2,
-            (chess.ROOK, chess.WHITE): 3,
-            (chess.QUEEN, chess.WHITE): 4,
-            (chess.KING, chess.WHITE): 5,
-            (chess.PAWN, chess.BLACK): 6,
-            (chess.KNIGHT, chess.BLACK): 7,
-            (chess.BISHOP, chess.BLACK): 8,
-            (chess.ROOK, chess.BLACK): 9,
-            (chess.QUEEN, chess.BLACK): 10,
-            (chess.KING, chess.BLACK): 11,
-        }
-    def board_to_tensor(self, board: chess.Board) -> np.ndarray:
-        """
-        Convert chess board to 19-channel tensor representation.
-
-        Channels 0-5: White pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-        Channels 6-11: Black pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-        Channels 12-15: Castling rights
-        Channel 16: En passant target
-        Channel 17: Move count (normalized)
-        Channel 18: Turn to move (1=white, 0=black)
-        """
-        tensor = np.zeros((19, 8, 8), dtype=np.float32)
-
-
-
-        # Fill piece channels
-        for square in chess.SQUARES:
-            piece = board.piece_at(square)
-            if piece:
-                channel = self.piece_map[(piece.piece_type, piece.color)]
-                row = 7 - (square // 8)  # Convert to array indexing
-                col = square % 8
-                tensor[channel, row, col] = 1.0
-
-        # Game state channels (12-18)
-        if board.has_kingside_castling_rights(chess.WHITE):
-            tensor[12, 7, 0] = 1.0
-        if board.has_queenside_castling_rights(chess.WHITE):
-            tensor[13, 7, 7] = 1.0
-        if board.has_kingside_castling_rights(chess.BLACK):
-            tensor[14, 0, 0] = 1.0
-        if board.has_queenside_castling_rights(chess.BLACK):
-            tensor[15, 0, 7] = 1.0
-
-        # En passant target
-        if board.ep_square is not None:
-            row = 7 - (board.ep_square // 8)
-            col = board.ep_square % 8
-            tensor[16, row, col] = 1.0
-
-        # Move count (normalized by 100)
-        tensor[17, :, :] = min(board.fullmove_number / 100.0, 1.0)
-
-        # Turn to move
-        if board.turn == chess.WHITE:
-            tensor[18, :, :] = 1.0
-
-        return tensor
 
     def move_to_index(self, move: chess.Move) -> int:
         """Convert move to index in 4096-dimensional output vector."""
@@ -122,28 +60,29 @@ class ChessTrainingDataGenerator:
                 continue
 
             # Create input tensor from current position
-            input_tensor = self.board_to_tensor(board)
+            for shape in ["normal", "flipped"]:
+                input_tensor = board_to_tensor(board, shape == "flipped")
 
-            # Create one-hot output vector
-            output_vector = np.zeros(4096, dtype=np.float32)
-            move_index = self.move_to_index(move)
-            output_vector[move_index] = 1.0
+                # Create one-hot output vector
+                output_vector = np.zeros(4096, dtype=np.float32)
+                move_index = self.move_to_index(move)
+                output_vector[move_index] = 1.0
 
-            # Store training example
-            training_data.append({
-                'input': input_tensor,
-                'output': output_vector,
-                'move_uci': move.uci(),
-                'fen': board.fen(),
-                'move_number': board.fullmove_number,
-                'game_info': {
-                    'white': game.headers.get("White", "Unknown"),
-                    'black': game.headers.get("Black", "Unknown"),
-                    'white_elo': white_elo,
-                    'black_elo': black_elo,
-                    'event': game.headers.get("Event", "Unknown")
-                }
-            })
+                # Store training example
+                training_data.append({
+                    'input': input_tensor,
+                    'output': output_vector,
+                    'move_uci': move.uci(),
+                    'fen': board.fen(),
+                    'move_number': board.fullmove_number,
+                    'game_info': {
+                        'white': game.headers.get("White", "Unknown"),
+                        'black': game.headers.get("Black", "Unknown"),
+                        'white_elo': white_elo,
+                        'black_elo': black_elo,
+                        'event': game.headers.get("Event", "Unknown")
+                    }
+                })
 
             board.push(move)
 
@@ -167,11 +106,44 @@ class ChessDataset(Dataset):
         return input_tensor, output_tensor
 
 
+def create_optimized_dataloaders(dataset, batch_size=512):
+    """Create CUDA-optimized data loaders"""
+
+    # Split dataset
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
+
+    # Optimized loader configuration
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,  # Increase based on CPU cores
+        pin_memory=True,  # Enable fast CPU->GPU transfer
+       # persistent_workers=True,  # Keep workers alive between epochs
+       # prefetch_factor=4  # Prefetch multiple batches
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size * 2,  # Larger batch for validation
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+       # persistent_workers=True
+    )
+
+    return train_loader, val_loader
+
+
 def create_chess_data_loaders(
         training_data: List[Dict],
+        batch_size,
+        num_workers,
         train_split: float = 0.8,
-        batch_size: int = 64,
-        num_workers: int = 4
 ) -> Tuple[DataLoader, DataLoader]:
     """Create training and validation data loaders."""
 
@@ -195,16 +167,19 @@ def create_chess_data_loaders(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=True, # Keep workers alive between epochs
+        prefetch_factor=4       # Prefetch multiple batches
         # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=batch_size * 2,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=False,
+        persistent_workers=True, # Keep workers alive between epochs
         # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
     )
 
@@ -231,12 +206,13 @@ def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
 # Example usage
 if __name__ == "__main__":
     # Sample master game
-    pkl_filename = "minimal_train_data.pkl"
-    max_games = 10
+    pkl_filename = "data/mvl_train_data.pkl"
+    max_games = 999999999
     print("Loading PGN games...")
-    games = load_pgn_games("./pgn/VachierLagrave.pgn", max_games)
+    games = load_pgn_games("data/pgn/VachierLagrave.pgn", max_games)
     print(f"Loaded {len(games)} games")
-
+    random.shuffle(games)
+    print("shuffled games")
     # Process the game
     generator = ChessTrainingDataGenerator(min_elo=2000)
 
@@ -254,8 +230,12 @@ if __name__ == "__main__":
             continue
 
     print(f"Generating {len(all_training_data)} training examples in {pkl_filename}")
+    random.shuffle(all_training_data)
+    print("shuffled all_training_data")
     # Save training data
     with open(pkl_filename, 'wb') as f:
         pickle.dump(all_training_data, f)
-
     print(f"Generated {len(all_training_data)} training examples in {pkl_filename}")
+    convert_pickle_to_memmap(pkl_filename, pkl_filename.replace(".pkl", ""))
+    print(f"moved {pkl_filename} to memmap files")
+

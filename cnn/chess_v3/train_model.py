@@ -1,9 +1,7 @@
 import time
 
-import torch
 import torch.nn as nn
 import torch.optim as optim
-from setuptools.errors import InvalidConfigError
 from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau
 import wandb
 from torchinfo import summary
@@ -12,13 +10,18 @@ import os
 from dotenv import load_dotenv
 import pickle
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import SequentialLR
+
+import multiprocessing as mp
+
 import torch
 from torch.amp import autocast, GradScaler
 
 from cnn.chess_v3.components.WandbLogger import EfficientBatchLogger
 from cnn.chess_v3.components.config import TRAINING_CONFIG
-from generate_data import create_chess_data_loaders
+from cnn.chess_v3.components.mmap_dataset import MemmapChessDataset
+from generate_data import create_chess_data_loaders, create_optimized_dataloaders
 from cnn.chess_v3.components.model_validator import ModelValidator
 from cnn.chess_v3.components.early_stopping import EarlyStopping
 from cnn.chess_v3.components.chess_cnn import EnhancedChessCNN
@@ -35,7 +38,7 @@ class Trainer:
             train_loader,
             val_loader,
             config: Dict,
-            project_name: str = "enhanced-chess-cnn",
+            project_name: str = "chess-cnn",
             experiment_name: str = None,
             learning_rate: float = 0.001,
             weight_decay: float = 1e-4,
@@ -46,6 +49,7 @@ class Trainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.config = config
+        self.batch_logger = EfficientBatchLogger(log_frequency=25)
 
         # Initialize W&B
         load_dotenv()
@@ -81,13 +85,18 @@ class Trainer:
                 patience=5, min_lr=1e-7
             )
         elif scheduler_type == 'cosine':
-            self.scheduler = LinearWarmupCosineAnnealingLR(
-                self.optimizer,
-                warmup_epochs=TRAINING_CONFIG["cosine"]["warmup_epochs"],
-                max_epochs=200,
-                warmup_start_lr=0.0001,
-                eta_min=TRAINING_CONFIG["cosine"]["eta_min"]
-            )
+            raise Exception("unstable")
+            # self.scheduler = LinearWarmupCosineAnnealingLR(
+            #     self.optimizer,
+            #     warmup_epochs=TRAINING_CONFIG["cosine"]["warmup_epochs"],
+            #     max_epochs=200,
+            #     warmup_start_lr=0.0001,
+            #     eta_min=TRAINING_CONFIG["cosine"]["eta_min"]
+            # )
+        elif scheduler_type == 'cosine_annealing':
+            warmup_scheduler = LinearLR(self.optimizer, start_factor=0.1, total_iters=TRAINING_CONFIG["cosine"]["warmup_epochs"])
+            cosine_scheduler = CosineAnnealingLR(self.optimizer, T_max=TRAINING_CONFIG["num_epoch"] - TRAINING_CONFIG["cosine"]["warmup_epochs"])
+            self.scheduler = SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], [TRAINING_CONFIG["cosine"]["warmup_epochs"]])
         else:
             self.scheduler = None
 
@@ -206,45 +215,47 @@ class Trainer:
 
         print("=" * 80)
 
-    def log_training_step(self, epoch: int, train_loss: float, val_loss: float,
-                          current_lr: float, step: int):
-        """Log training metrics to W&B."""
-        wandb.log({
-            "epoch": epoch,
-            "train/loss": train_loss,
-            "train/learning_rate": current_lr,
-            "validation/loss": val_loss,
-            "step": step
-        })
-
     def train_epoch(self, epoch):
-        """Train for one epoch with gradient clipping and W&B logging."""
-        self.model.train()
-        if TRAINING_CONFIG["device"] == "cuda":
-            self.model = self.model.to('cuda')  # Redundant but safe
-        total_loss = 0.0
-        num_batches = 0
-
-        batch_logger = EfficientBatchLogger(log_frequency=25)
-
         # Get model device dynamically
         device = next(self.model.parameters()).device
 
         if not str(device).__contains__(TRAINING_CONFIG["device"]):
             raise Exception(f"next(self.model.parameters()).device should be {TRAINING_CONFIG["device"]} but is {device}")
+        start = time.time()
+        print(f"[{start}] start training epoch : {epoch} on {device}")
+        """Train for one epoch with gradient clipping and W&B logging."""
+        if TRAINING_CONFIG["device"] == "cuda" and not str(device).__contains__("cuda"):
+            self.model = self.model.to('cuda')  # Redundant but safe
+        self.model.train()
+        # print(f"self.model.train() done on epoch : {epoch} on {device} in {time.time() - start} seconds")
+        total_loss = 0.0
+        num_batches = 0
+        # Get a single batch from the train_loader
+        # d, t = next(iter(train_loader))
 
+        # Check device for input and target
+        # print(f"epoch {epoch}: Data {len(d)} device: {d.device}")
+        # print(f"epoch {epoch}: Target {len(t)} device: {t.device}")
+        total_data = 0
         for batch_idx, (data, target) in enumerate(self.train_loader):
+            # print(f"start batch {batch_idx} of size {len(data)} for epoch : {epoch} on {device}")
             batch_start_time = time.time()
+            total_data += len(data)
             if TRAINING_CONFIG["device"] == "cuda":
+                # print(f"Data might already be on CUDA: {data.device}")
+                # print(f"Target might already be on CUDA: {target.device}")
                 # Data should be already on CUDA from DataLoader
-                data = data.to(device)
-                target = target.to(device)
+                data = data.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                # print(f"Data should be on CUDA: {data.device}")
+                # print(f"Target should be on CUDA: {target.device}")
             if not str(data.device).__contains__(TRAINING_CONFIG["device"]):
                 print(f"Data device not {TRAINING_CONFIG["device"]}: {data.device}")  # Should be cuda:0
             if not str(target.device).__contains__(TRAINING_CONFIG["device"]):
                 print(f"Target device not {TRAINING_CONFIG["device"]}: {target.device}")  # Should be cuda:0
             if not str(next(model.parameters()).device).__contains__(TRAINING_CONFIG["device"]):
                 print(f"Model device not {TRAINING_CONFIG["device"]}: {next(model.parameters()).device}")  # Should be cuda:0
+
             self.optimizer.zero_grad()
             if TRAINING_CONFIG["mixed_precision"]:
                 # --- AMP block starts here ---
@@ -270,10 +281,10 @@ class Trainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-            # Scheduler step (if not ReduceLROnPlateau)
-            if self.scheduler and not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                self.scheduler.step()
-            else:
+                # Scheduler step (if not ReduceLROnPlateau)
+                # if self.scheduler and not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                #     self.scheduler.step()
+                # else:
                 self.optimizer.step()
 
             total_loss += loss.item()
@@ -282,19 +293,20 @@ class Trainer:
             batch_time = time.time() - batch_start_time
             current_lr = self.optimizer.param_groups[0]['lr']
 
-            if batch_idx % 10 == 1:  # Calculate accuracy every 10 batches
-                with torch.no_grad():
-                    pred = output.argmax(dim=1, keepdim=True)
-                    print(f"pred shape: {pred.shape}, target shape: {target.shape}")
-                    pred = output.argmax(dim=1)  # [batch_size, H, W]
-                    correct = pred.eq(target).sum().item()
-                    # correct = pred.eq(target.view_as(pred)).sum().item()
-                    accuracy = 100. * correct / len(data)
-            else:
-                accuracy = None
+            # if batch_idx % 10 == 1:  # Calculate accuracy every 10 batches
+            #     with torch.no_grad():
+            #         pred = output.argmax(dim=1, keepdim=True)
+            #         print(f"pred shape: {pred.shape}, target shape: {target.shape}")
+            #         pred = output.argmax(dim=1)  # [batch_size, H, W]
+            #         correct = pred.eq(target).sum().item()
+            #         # correct = pred.eq(target.view_as(pred)).sum().item()
+            #         accuracy = 100. * correct / len(data)
+            # else:
+            accuracy = None
 
+            self.optimizer.zero_grad(set_to_none=True)
                 # Log batch metrics efficiently
-            batch_logger.log_batch_metrics(
+            self.batch_logger.log_batch_metrics(
                 batch_idx,
                 loss.item(),
                 accuracy if accuracy else 0.0,
@@ -302,15 +314,16 @@ class Trainer:
             )
 
             # Additional detailed logging for specific batches
-            if batch_idx % 25 == 0:
-                batch_logger.log_detailed_batch_info(self.model, self.train_loader, batch_idx, epoch, batch_time, loss.item())
+            if True or batch_idx % 10 == 1:
+                self.batch_logger.log_detailed_batch_info(self.model, self.train_loader, batch_idx, epoch, batch_time, loss.item())
             # Log batch-level metrics occasionally
             # if batch_idx % 25 == 0 or batch_idx == 0:
             #     wandb.log({
             #         "train/batch_loss": loss.item(),
             #         "train/batch_idx": batch_idx
             #     })
-
+        stop = time.time()
+        print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start:.2f} seconds ({total_data // num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
         return total_loss / num_batches
 
     def validate(self):
@@ -350,6 +363,7 @@ class Trainer:
 
         for epoch in range(num_epochs):
             # Training
+            start = time.time()
             train_loss = self.train_epoch(epoch)
 
             # Validation
@@ -362,7 +376,7 @@ class Trainer:
             self.learning_rates.append(current_lr)
 
             # Log to W&B
-            self.log_training_step(epoch, train_loss, val_loss, current_lr, global_step)
+            self.batch_logger.log_training_step(epoch, train_loss, val_loss, current_lr, global_step)
 
             # Learning rate scheduling
             if self.scheduler:
@@ -383,12 +397,13 @@ class Trainer:
                 print(f"   • Train Loss: {train_loss:.6f}")
                 print(f"   • Val Loss:   {val_loss:.6f}")
                 print(f"   • LR:         {current_lr:.2e}")
+                print(f"   • Duration:   {time.time() - start:.2f} seconds")
                 print("-" * 40)
 
             global_step += 1
 
         # Final model save to W&B
-        torch.save(self.model.state_dict(), "enhanced_chess_cnn_final.pth")
+        torch.save(self.model.state_dict(), "data/enhanced_chess_cnn_final.pth")
         wandb.save("enhanced_chess_cnn_final.pth")
 
         # Log final metrics
@@ -460,7 +475,10 @@ def create_enhanced_chess_model_with_validation(config=None):
 
 # Example usage with comprehensive setup
 if __name__ == "__main__":
-    pkl_file = 'chess_training_data.pkl'
+    # Set spawn method explicitly (Windows default, but be explicit)
+    mp.set_start_method('spawn', force=True)
+    pkl_file = 'data/chess_training_data.pkl'
+    mmap_file = 'data/mvl_train_data'
     # pkl_file = "minimal_train_data.pkl" #full training data: 'chess_training_data.pkl'
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
@@ -470,14 +488,27 @@ if __name__ == "__main__":
     model, config = create_enhanced_chess_model_with_validation()
 
     # Example training setup (requires actual data loaders)
-    training_data = load_chess_training_data(pkl_file)
-    print(f"Loaded training data from {pkl_file}")
-    train_loader, val_loader = create_chess_data_loaders(
-        training_data,
-        train_split=0.8,
-        batch_size= TRAINING_CONFIG["batch_size"],  # To be adjusted
-        num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
-    )
+    # training_data = load_chess_training_data(pkl_file)
+
+    dataset = MemmapChessDataset(mmap_file)
+    print(f"Loaded training data from {mmap_file}")
+    train_loader, val_loader = create_optimized_dataloaders(dataset, batch_size=TRAINING_CONFIG["batch_size"])
+
+    # train_loader, val_loader = create_chess_data_loaders(
+    #     training_data,
+    #     train_split=0.8,
+    #     batch_size= TRAINING_CONFIG["batch_size"],  # To be adjusted
+    #     num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
+    # )
+
+    print(f"Reviewing device of data loaders from {mmap_file}")
+    d, t = next(iter(val_loader))
+    print(f"pre-training val_loader: Data {len(d)} device: {d.device}")
+    print(f"pre-training val_loader: Target {len(t)} device: {t.device}")
+    d, t = next(iter(train_loader))
+    print(f"pre-training train_loader: Data {len(d)} device: {d.device}")
+    print(f"pre-training train_loader: Target {len(t)} device: {t.device}")
+
 
     # Initialize trainer with W&B integration
     trainer = Trainer(
@@ -492,6 +523,8 @@ if __name__ == "__main__":
         scheduler_type=TRAINING_CONFIG["scheduler_type"],
         early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
     )
+    print(f"Model should be on CUDA: {next(model.parameters()).device}")
+
 
     # Print comprehensive model summary
     trainer.print_model_summary()
