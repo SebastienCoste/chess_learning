@@ -91,7 +91,7 @@ class ChessLLMPlayer:
 
         candidates = []
         failed_candidates = ["toto"]
-        while not candidates:
+        while not candidates and len(failed_candidates) < 25:
             messages = self.build_chat_messages(failed_candidates)
             try:
                 prompt = self.tokenizer.apply_chat_template(
@@ -132,10 +132,11 @@ class ChessLLMPlayer:
                 if move:
                     candidates.append(move)
             except Exception as e:
-                print(f"Error generating candidate {i}: {e}")
+                print(f"Error generating candidate: {e}")
                 continue
 
         if not candidates:
+            print(f"Nothing good, generate_fallback_moves")
             return self.generate_fallback_moves(num_candidates)
         return candidates
 
@@ -240,29 +241,36 @@ class ChessLLMPlayer:
         print("Enter moves in standard algebraic notation (e.g., e4, Nf3, O-O)")
         print("Type 'quit' to exit, 'help' for available commands\n")
         self.display_board()
+        opening = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
+        move_cnt = 0
         while not self.board.is_game_over():
-            if self.board.turn == chess.WHITE:
-                print(f"\nYour turn (White). Legal moves: {len(list(self.board.legal_moves))}")
-                user_input = input("Enter your move: ").strip()
-                if user_input.lower() == 'quit':
-                    print("Thanks for playing!")
-                    break
-                elif user_input.lower() == 'help':
-                    self.show_help()
-                    continue
-                elif user_input.lower() == 'moves':
-                    legal_moves = [self.board.san(move) for move in self.board.legal_moves]
-                    print(f"Legal moves: {', '.join(legal_moves)}.")
-                    continue
-                if self.make_human_move(user_input):
-                    self.display_board()
+            if move_cnt < len(opening):
+                self.make_human_move(opening[move_cnt])
+                self.display_board()
+                move_cnt += 1
             else:
-                move = self.make_ai_move()
-                if move:
-                    self.display_board()
+                if self.board.turn == chess.WHITE:
+                    print(f"\nYour turn (White). Legal moves: {len(list(self.board.legal_moves))}")
+                    user_input = input("Enter your move: ").strip()
+                    if user_input.lower() == 'quit':
+                        print("Thanks for playing!")
+                        break
+                    elif user_input.lower() == 'help':
+                        self.show_help()
+                        continue
+                    elif user_input.lower() == 'moves':
+                        legal_moves = [self.board.san(move) for move in self.board.legal_moves]
+                        print(f"Legal moves: {', '.join(legal_moves)}.")
+                        continue
+                    if self.make_human_move(user_input):
+                        self.display_board()
                 else:
-                    print("AI error - ending game")
-                    break
+                    move = self.make_ai_move()
+                    if move:
+                        self.display_board()
+                    else:
+                        print("AI error - ending game")
+                        break
         self.show_game_result()
 
     def show_help(self):

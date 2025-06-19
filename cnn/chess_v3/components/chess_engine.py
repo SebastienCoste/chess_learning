@@ -106,6 +106,15 @@ class SimpleChessEngine:
         try:
             # Get model predictions
             x = board_to_tensor(board)
+            # Convert to PyTorch tensor
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x).float()
+            x = x.to(self.device)
+            # Add batch dimension if needed
+            if len(x.shape) == 2:  # If it's just [height, width]
+                x = x.unsqueeze(0)  # Make it [1, height, width]
+            elif len(x.shape) == 3:  # If it's [channels, height, width]
+                x = x.unsqueeze(0)  # Make it [1, channels, height, width]
             with torch.no_grad():
                 logits = self.model(x)
                 probabilities = torch.softmax(logits, dim=1)

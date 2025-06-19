@@ -23,7 +23,7 @@ class EfficientBatchLogger:
                 "batch/accuracy": accuracy,
                 "batch/learning_rate": learning_rate,
                 "batch/batch_idx": batch_idx
-            }, step=batch_idx)
+            }, commit=False)
 
             # Reset accumulators
             self.running_loss = 0.0
@@ -55,4 +55,18 @@ class EfficientBatchLogger:
             "detailed/gpu_cached_gb": gpu_cached,
             "detailed/gradient_norm": total_norm,
             "detailed/samples_per_second": len(train_loader.dataset) / batch_time,
-        }, step=batch_idx)
+        }, commit=False)
+
+    def log_training_step(self, epoch: int, train_loss: float, val_loss: float,
+                          current_lr: float, step: int):
+        """Log training metrics to W&B."""
+        wandb.log({
+            "epoch": epoch,
+            "train/loss": train_loss,
+            "train/learning_rate": current_lr,
+            "validation/loss": val_loss,
+            "step": step
+        })
+        self.batch_metrics = []
+        self.running_loss = 0.0
+        self.batch_count = 0

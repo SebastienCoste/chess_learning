@@ -148,10 +148,10 @@ def main():
 
     model_path = args.model
     if not model_path:
-        model_path = input("Enter the path to your model file (e.g., chessMVLv1.pth): ").strip()
+        model_path = input("Enter the path to your model file (e.g. chessMVLv3.pth): ").strip()
         if not model_path:
-            print("No model specified. Using random move generator for demo.")
-            model_path = None
+            print("No model specified. Using data/chessMVLv2.pth.")
+            model_path = "./data/chessMVLv2.pth"
 
     
     # Initialize components
@@ -166,7 +166,15 @@ def main():
     print("Commands: Type moves like 'e4', 'Nf3', or 'quit' to exit")
     move_count = 0
     # Game loop
+    opening = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
     while not board.is_game_over():
+        if move_count < len(opening):
+            move = board.parse_san(opening[move_count])
+            move_count+=1
+            board.push(move)
+            display.display_board(board)
+            display.display_info(board, player_color)
+            continue
         os.system('cls' if os.name == 'nt' else 'clear')  # Clear screen
         display.display_board(board)
         display.display_info(board, player_color)
@@ -191,8 +199,7 @@ def main():
             else:
                 print("AI cannot move!")
                 break
-            input("Press Enter to continue...")
-    
+
     # Game over
     os.system('cls' if os.name == 'nt' else 'clear')
     display.display_board(board)

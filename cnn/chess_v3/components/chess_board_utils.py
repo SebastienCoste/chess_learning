@@ -35,7 +35,7 @@ def board_to_tensor(board: chess.Board, flipped: bool = False) -> np.ndarray:
         piece = board.piece_at(square)
         if piece:
             channel = PIECES_MAP[(piece.piece_type, piece.color if not flipped else not piece.color)]
-            row = 7 - (square // 8)  # Convert to array indexing
+            row = 7 - (square // 8) if not flipped else  square // 8 # Convert to array indexing
             col = square % 8
             tensor[channel, row, col] = 1.0
 
@@ -51,7 +51,7 @@ def board_to_tensor(board: chess.Board, flipped: bool = False) -> np.ndarray:
 
     # En passant target
     if board.ep_square is not None:
-        row = 7 - (board.ep_square // 8)
+        row = 7 - (board.ep_square // 8) if not flipped else  board.ep_square // 8
         col = board.ep_square % 8
         tensor[16, row, col] = 1.0
 

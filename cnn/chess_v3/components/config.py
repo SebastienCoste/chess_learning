@@ -6,13 +6,13 @@ TRAINING_CONFIG = {
     "kernel_size": 3,
     "input_channels": INPUT_CHANNEL,
     "board_size": 8,
-    "batch_size": 512,  # To be adjusted. 128 is way too small5
+    "batch_size": 1024,  # To be adjusted. 128 is way too small5
     "num_workers": 16, #8 cores, 16 virtual workers
-    "version": "v2",
+    "version": "v3.0.1",
     "learning_rate": 0.001,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
-    "scheduler_type": 'cosine', #'reduce_on_plateau'
-    "early_stopping_patience": 10,
+    "scheduler_type": 'cosine_annealing', #'reduce_on_plateau'
+    "early_stopping_patience": 150,
     "mixed_precision": True,
     "config": {
             'input_channels': INPUT_CHANNEL,
@@ -28,7 +28,7 @@ TRAINING_CONFIG = {
             'transformer_heads': 8,
         },
     "cosine": {
-        "warmup_epochs": 10,  # Ramp up learning rate gradually
+        "warmup_epochs": 0, #or 10 ? # Ramp up learning rate gradually
         "min_lr": 1e-7,
         "eta_min": 1e-7 ,     # Minimum LR for cosine annealing
     }
