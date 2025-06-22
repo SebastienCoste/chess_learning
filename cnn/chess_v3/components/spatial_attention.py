@@ -1,14 +1,60 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-class SpatialAttention(nn.Module):
+from cnn.chess_v3.components.config import TRAINING_CONFIG
+
+
+class SimplifiedSelfAttention(nn.Module):
+    def __init__(self, embed_dim=128, num_heads=4):
+        super(SimplifiedSelfAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        # Reduced complexity with fewer heads
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        # Stronger normalization layers around attention
+        self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # Apply normalization before attention (norm-first approach)
+        x_norm = self.norm1(x)
+
+        # Project to queries, keys, values
+        qkv = self.qkv_proj(x_norm)
+        qkv = qkv.reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # Compute attention scores
+        attn = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+        attn = F.softmax(attn, dim=-1)
+
+        # Apply attention to values
+        out = attn @ v
+        out = out.transpose(1, 2).reshape(batch_size, seq_len, self.embed_dim)
+        out = self.out_proj(out)
+
+        # Apply second normalization
+        out = self.norm2(out + x)
+
+        return out
+
+
+class SpatialChannelAttention(nn.Module):
     """
     Spatial attention mechanism for chess board regions.
     Generates attention weights for each spatial location.
     """
 
     def __init__(self, in_channels, reduction_ratio=8):
-        super(SpatialAttention, self).__init__()
+        super(SpatialChannelAttention, self).__init__()
 
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
@@ -49,3 +95,20 @@ class SpatialAttention(nn.Module):
         x = x * spatial_weights
 
         return x
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=TRAINING_CONFIG["spatial_kernel_size"]):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Generate spatial attention map
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        y = torch.cat([avg_out, max_out], dim=1)
+        y = self.conv(y)
+
+        # Apply spatial attention
+        return x * self.sigmoid(y)

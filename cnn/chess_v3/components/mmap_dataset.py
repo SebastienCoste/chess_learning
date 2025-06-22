@@ -68,4 +68,4 @@ class MemmapChessDataset(Dataset):
 
 
 if __name__ == "__main__":
-    convert_pickle_to_memmap("../data/mvl_train_data.pkl", "../data/mvl_train_data")
+    convert_pickle_to_memmap("../data/all_train_data.pkl", "../data/all_train_data")

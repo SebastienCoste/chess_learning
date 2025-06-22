@@ -18,10 +18,14 @@ import multiprocessing as mp
 import torch
 from torch.amp import autocast, GradScaler
 
+from cnn.chess_v3.components.EMA import EMA
 from cnn.chess_v3.components.WandbLogger import EfficientBatchLogger
+from cnn.chess_v3.components.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess_v3.components.config import TRAINING_CONFIG
+from cnn.chess_v3.components.focal_loss import FocalLoss
 from cnn.chess_v3.components.mmap_dataset import MemmapChessDataset
-from generate_data import create_chess_data_loaders, create_optimized_dataloaders
+from cnn.chess_v3.components.module_utils import centralize_gradient, mixup_data, mixup_criterion
+from generate_data import create_optimized_dataloaders
 from cnn.chess_v3.components.model_validator import ModelValidator
 from cnn.chess_v3.components.early_stopping import EarlyStopping
 from cnn.chess_v3.components.chess_cnn import EnhancedChessCNN
@@ -67,6 +71,8 @@ class Trainer:
         wandb.watch(self.model, log_freq=100, log="all")
         self.scaler = GradScaler()  # Add this line for AMP
 
+        self.ema = EMA(model, decay=0.999)
+
         # Optimizer with weight decay (L2 regularization)
         self.optimizer = optim.AdamW(
             model.parameters(),
@@ -75,6 +81,9 @@ class Trainer:
             betas=(0.9, 0.999),
             eps=1e-8
         )
+
+        # Initialize focal loss
+        self.criterion = FocalLoss(gamma=2.0)
 
         # Learning rate scheduler
         if scheduler_type == 'exponential':
@@ -256,36 +265,56 @@ class Trainer:
             if not str(next(model.parameters()).device).__contains__(TRAINING_CONFIG["device"]):
                 print(f"Model device not {TRAINING_CONFIG["device"]}: {next(model.parameters()).device}")  # Should be cuda:0
 
-            self.optimizer.zero_grad()
+            # Apply mixup augmentation
+            mixed_data, targets_a, targets_b, lam = mixup_data(data, target, alpha=0.2)
+
             if TRAINING_CONFIG["mixed_precision"]:
                 # --- AMP block starts here ---
                 with autocast(dtype=torch.float16, device_type="cuda"):
-                    output = self.model(data)
-                    loss = self.criterion(output, target)
+                    # output = self.model(data)
+                    output = model(mixed_data)
+                    # loss = self.criterion(output, target)
+                    loss = mixup_criterion(self.criterion, output, targets_a, targets_b, lam)
                     # Backward pass with gradient scaling
+                self.optimizer.zero_grad()
                 self.scaler.scale(loss).backward()
 
                 # Unscale gradients before clipping (recommended)
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # Apply gradient centralization
+                #Gradient centralization improves training stability by removing the mean from gradients . This reduces internal covariate shift and helps with faster convergence.
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad.data = centralize_gradient(param.grad.data)
+
+                # Aggressive gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=TRAINING_CONFIG["gradient_clipping"]) #Reduced from 1.0
 
                 # Optimizer step with scaler
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                # Update EMA parameters
+                self.ema.update()
             else:
                 # Forward pass
                 output = self.model(data)
                 loss = self.criterion(output, target)
 
+                self.optimizer.zero_grad()
                 # Backward pass with gradient clipping
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=TRAINING_CONFIG["gradient_clipping"]) #Reduced from 1.0
 
                 # Scheduler step (if not ReduceLROnPlateau)
                 # if self.scheduler and not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 #     self.scheduler.step()
                 # else:
                 self.optimizer.step()
+
+                #Gradient centralization improves training stability by removing the mean from gradients . This reduces internal covariate shift and helps with faster convergence.
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad.data = centralize_gradient(param.grad.data)
 
             total_loss += loss.item()
             num_batches += 1
@@ -323,12 +352,13 @@ class Trainer:
             #         "train/batch_idx": batch_idx
             #     })
         stop = time.time()
-        print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start:.2f} seconds ({total_data // num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
+        print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start:.2f} seconds ({total_data / num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
         return total_loss / num_batches
 
     def validate(self):
         """Validate the model."""
         self.model.eval()
+        self.ema.apply_shadow()
         device = next(self.model.parameters()).device
         if not str(device).__contains__(TRAINING_CONFIG["device"]):
             raise Exception(f"next(self.model.parameters()).device is {device} but should be {TRAINING_CONFIG['device']}")
@@ -344,6 +374,8 @@ class Trainer:
                 total_loss += loss.item()
                 num_batches += 1
 
+        # Restore original parameters for next training epoch
+        self.ema.restore()
         return total_loss / num_batches
 
     def train(self, num_epochs: int):
@@ -387,13 +419,13 @@ class Trainer:
 
             # Early stopping check
             if self.early_stopping(val_loss, self.model):
-                print(f"\n🛑 Early stopping triggered at epoch {epoch + 1}")
+                print(f"\n🛑 Early stopping triggered at epoch {epoch}")
                 wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1}, commit=True)
                 break
 
             # Progress reporting
             if True or (epoch + 1) % 10 == 0 or epoch == 0:
-                print(f"📊 Epoch {epoch + 1:3d}/{num_epochs}")
+                print(f"📊 Epoch {epoch:3d}/{num_epochs}")
                 print(f"   • Train Loss: {train_loss:.6f}")
                 print(f"   • Val Loss:   {val_loss:.6f}")
                 print(f"   • LR:         {current_lr:.2e}")
@@ -442,7 +474,8 @@ def create_enhanced_chess_model_with_validation(config=None):
     # Create model
     if TRAINING_CONFIG["device"] == "cuda" and not torch.cuda.is_available():
         raise Exception("CUDA required in TRAINING_CONFIG but not available")
-    model = EnhancedChessCNN(**config).to('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else "cpu")
+    model = EnhancedChessCNNV2(**config).to('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else "cpu")
+
     print(f"EnhancedChessCNN is using device {next(model.parameters()).device}")
     if TRAINING_CONFIG["device"] == "cuda":
         if not all(param.device.type == 'cuda' for param in model.parameters()):
@@ -477,9 +510,9 @@ def create_enhanced_chess_model_with_validation(config=None):
 if __name__ == "__main__":
     # Set spawn method explicitly (Windows default, but be explicit)
     mp.set_start_method('spawn', force=True)
-    pkl_file = 'data/chess_training_data.pkl'
-    mmap_file = 'data/mvl_train_data'
-    # pkl_file = "minimal_train_data.pkl" #full training data: 'chess_training_data.pkl'
+    # mmap_file = 'data/mvl_train_data' #MVL games only, for shorter epochs
+    train_type = "all_train_data_with_puzzles"
+    mmap_file = f'data/{train_type}'
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
     print("=" * 80)
@@ -517,7 +550,7 @@ if __name__ == "__main__":
         val_loader=val_loader,
         config=config,
         project_name=f"chess-cnn",
-        experiment_name=f"run-{pkl_file.replace(".pkl", "")}-{TRAINING_CONFIG["version"]}",
+        experiment_name=f"run-{train_type}-{TRAINING_CONFIG["version"]}",
         learning_rate=TRAINING_CONFIG["learning_rate"],
         weight_decay=TRAINING_CONFIG["weight_decay"],
         scheduler_type=TRAINING_CONFIG["scheduler_type"],

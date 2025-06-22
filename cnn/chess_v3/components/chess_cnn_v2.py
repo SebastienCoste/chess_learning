@@ -23,7 +23,7 @@ def get_activation_function(activation_name='gelu'):
     }
     return activations.get(activation_name.lower(), nn.GELU)
 
-class EnhancedChessCNN(nn.Module):
+class EnhancedChessCNNV2(nn.Module):
     """
     Enhanced Convolutional Neural Network for chess move prediction.
     Incorporates residual connections, modern activations, attention mechanisms,
@@ -45,7 +45,7 @@ class EnhancedChessCNN(nn.Module):
             transformer_heads=8,
             kernel_size = TRAINING_CONFIG["kernel_size"],
     ):
-        super(EnhancedChessCNN, self).__init__()
+        super(EnhancedChessCNNV2, self).__init__()
         self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
         self.to(self.device)  # Move entire model to CUDA immediately
         print(f"EnhancedChessCNN is initialized using device {self.device}")
@@ -65,53 +65,49 @@ class EnhancedChessCNN(nn.Module):
 
         # Positional encoding
         self.pos_encoding = PositionalEncoding2D(input_channels, board_size, board_size)
-        # Convolutional layers with residual blocks
-        self.conv_layers = nn.ModuleList()
-        in_channels = input_channels
+        # Initial convolution
+        self.initial_conv = MultiScaleConv(input_channels, 64)
+        # Dense blocks with transition layers
+        self.dense_block1 = DenseBlock(64, growth_rate=32, num_layers=4)
+        in_channels = 64 + 4 * 32  # Initial + growth_rate * num_layers
+        self.transition1 = TransitionLayer(in_channels, in_channels // 2)
 
-        for filters in conv_filters:
-            block = ResidualBlock(
-                in_channels,
-                filters,
-                activation_fn=activation_fn,
-                batch_norm=batch_norm,
-                dropout_rate=dropout_rate,
-                kernel_size=self.kernel_size,
-            )
-            self.conv_layers.append(block)
+        # SE-ResNet block
+        self.se_block = SEResidualBlock(in_channels // 2)
 
-            # Add attention after each residual block
-            if use_attention:
-                attention = SpatialChannelAttention(filters)
-                self.conv_layers.append(attention)
+        # Spatial attention
+        self.spatial_attn = SpatialAttention()
 
-            in_channels = filters
+        # Simplified self-attention
+        self.self_attn = SimplifiedSelfAttention(embed_dim=96, num_heads=4) #or embed_dim = 128 ?
 
-        # Calculate flattened size
-        self.flattened_size = in_channels * board_size * board_size
+        # Stochastic depth
+        self.stochastic_depth = StochasticDepth(drop_prob=0.1)
 
-        # Transformer blocks (optional)
-        if use_transformer_blocks:
-            self.transformer_blocks = nn.ModuleList([
-                ChessTransformerBlock(
-                    embed_dim=in_channels,
-                    num_heads=transformer_heads,
-                    dropout=dropout_rate
-                ) for _ in range(num_transformer_layers)
-            ])
-
-        # Fully connected layers
-        self.fc_layers_list = nn.ModuleList()
-        in_features = self.flattened_size
-
-        for fc_size in fc_layers:
-            self.fc_layers_list.append(nn.Linear(in_features, fc_size))
-            self.fc_layers_list.append(activation_fn())
-            self.fc_layers_list.append(nn.Dropout(dropout_rate))
-            in_features = fc_size
-
-        # Output layer
-        self.output_layer = nn.Linear(in_features, 64 * 64)
+        # Output layers
+        self.flatten = nn.Flatten()
+        #below is incorrect because of RuntimeError: mat1 and mat2 shapes cannot be multiplied (1024x1536 and 6144x4096)
+        # at x = self.fc(x)
+        #self.fc = nn.Linear((in_channels // 2) * board_size * board_size, 64 * 64)
+        # because nn.AvgPool2d(kernel_size=2, stride=2)  reduces the board_size from 8 to 4
+        #Below is the correct one but fixed
+        # self.fc = nn.Linear((in_channels // 2) * (board_size // 2) * (board_size // 2), 64 * 64)
+        # Below is the dynamic one
+        with torch.no_grad():
+            dummy_input = torch.randn(1, TRAINING_CONFIG["input_channels"], TRAINING_CONFIG["board_size"], TRAINING_CONFIG["board_size"])
+            x = dummy_input
+            #Reproducing what we have above
+            x = self.initial_conv(x)
+            x = self.dense_block1(x)
+            x = self.transition1(x)
+            identity = x
+            x = self.se_block(x)
+            x = self.stochastic_depth(x)
+            x = x + identity
+            x = self.spatial_attn(x)
+            batch, channels, height, width = x.shape
+            features = channels * height * width
+            self.fc = nn.Linear(features, 64 * 64)
 
         # Initialize weights
         self._initialize_weights()
@@ -131,37 +127,34 @@ class EnhancedChessCNN(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        # Add positional encoding
-        x = self.pos_encoding(x)
+        # Multi-scale feature extraction
+        x = self.initial_conv(x)
 
-        # Convolutional layers with residual connections and attention
-        for layer in self.conv_layers:
-            x = layer(x)
+        # Dense connectivity
+        x = self.dense_block1(x)
+        x = self.transition1(x)
 
-        # Transformer blocks (if enabled)
-        if self.use_transformer_blocks:
-            batch_size, channels, height, width = x.size()
-            # Reshape for transformer: (batch, seq_len, embed_dim)
-            x_reshaped = x.view(batch_size, channels, -1).transpose(1, 2)
+        # SE-ResNet with stochastic depth
+        identity = x
+        x = self.se_block(x)
+        x = self.stochastic_depth(x)
+        x = x + identity
 
-            for transformer in self.transformer_blocks:
-                x_reshaped = transformer(x_reshaped)
+        # Spatial attention
+        x = self.spatial_attn(x)
 
-            # Reshape back to conv format
-            x = x_reshaped.transpose(1, 2).view(batch_size, channels, height, width)
+        # Reshape for self-attention
+        batch, channels, height, width = x.shape
+        x = x.view(batch, channels, -1).transpose(1, 2)
 
-        # Flatten
-        #can't run x = x.view(x.size(0), -1) because of:
-        # view size is not compatible with input tensor's size and stride (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
-        # so might also write x = x.contiguous().view(x.size(0), -1)
-        x = x.reshape(x.size(0), -1)
+        # Simplified self-attention
+        x = self.self_attn(x)
 
-        # Fully connected layers
-        for layer in self.fc_layers_list:
-            x = layer(x)
-
-        # Output layer
-        x = self.output_layer(x)
+        # Reshape back and output
+        x = x.transpose(1, 2).view(batch, channels, height, width)
+        x = self.flatten(x)
+        #print(f"Flattened shape: {x.shape}")  # Should be [batch, 1536]
+        x = self.fc(x)
 
         return x
 

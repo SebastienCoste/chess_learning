@@ -1,15 +1,14 @@
 import random
-
+import os
+import gc
 import chess
 import chess.pgn
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-import pickle
 from typing import List, Dict, Tuple
 
 from cnn.chess_v3.components.chess_board_utils import board_to_tensor
-from cnn.chess_v3.components.mmap_dataset import convert_pickle_to_memmap
 
 
 class ChessTrainingDataGenerator:
@@ -17,11 +16,14 @@ class ChessTrainingDataGenerator:
     Converts PGN chess games into training data for CNN.
     """
 
-    def __init__(self, min_elo: int = 2000, skip_opening_moves: int = 6,
-                 skip_endgame_moves: int = 10):
-        self.min_elo = min_elo
+    def __init__(self,
+                 #min_elo: int = 2000,
+                 skip_opening_moves: int = 6,
+                 #skip_endgame_moves: int = 10
+                 ):
+        #self.min_elo = min_elo
         self.skip_opening_moves = skip_opening_moves
-        self.skip_endgame_moves = skip_endgame_moves
+        # self.skip_endgame_moves = skip_endgame_moves
 
 
     def move_to_index(self, move: chess.Move) -> int:
@@ -44,20 +46,21 @@ class ChessTrainingDataGenerator:
         #         print(f"Skipping game: ELO too low (W:{white_elo}, B:{black_elo})")
         #         return []
         except (ValueError, TypeError):
-            print("Could not parse ELO ratings")
+            # print("Could not parse ELO ratings")
             white_elo = 0
             black_elo = 0
 
         training_data = []
         board = game.board()
         moves = list(game.mainline_moves())
-
+        is_puzzle = board.fullmove_number > 1
+        # skip_one = is_puzzle #On puzzles skip the 1st move it's the mistake
         for move_idx, move in enumerate(moves):
             # Skip opening and endgame moves
-            if (move_idx < self.skip_opening_moves or
-                    len(moves) - move_idx <= self.skip_endgame_moves):
+            if not is_puzzle and move_idx < self.skip_opening_moves:
                 board.push(move)
                 continue
+
 
             # Create input tensor from current position
             for shape in ["normal", "flipped"]:
@@ -191,8 +194,8 @@ def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
     with open(pgn_file, 'r', encoding='utf-8') as f:
         while len(games) < max_games:
             try:
-                if len(games) % 100 == 0:
-                    print(f"Loading game {len(games)}")
+                if len(games) % 1000 == 0:
+                    print(f"Loading game {len(games)}, remains {max_games - len(games)}")
                 game = chess.pgn.read_game(f)
                 if game is None:
                     break
@@ -203,39 +206,78 @@ def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
 
     return games
 
+def aggregate_pgn_games(directory, max_games):
+    all_games = []
+    for filename in os.listdir(directory):
+        if filename.endswith('.pgn'):
+            file_path = os.path.join(directory, filename)
+            print(f"Loading games from {file_path}")
+            games = load_pgn_games(file_path, max_games - len(all_games))
+            print(f"Loaded {len(games)} games from {file_path}, remains {max_games - len(games)}")
+            all_games.extend(games)
+    random.shuffle(all_games)
+    return all_games
+
 # Example usage
 if __name__ == "__main__":
     # Sample master game
-    pkl_filename = "data/mvl_train_data.pkl"
-    max_games = 999999999
+    mmap_filename = "data/all_train_data_with_puzzles_v2"
+    max_games = 10_000_000
+    estimated_positions_count = 16_667_704 + 10 # used to allocate space
+    fail_if_more_positions_available = True
     print("Loading PGN games...")
-    games = load_pgn_games("data/pgn/VachierLagrave.pgn", max_games)
-    print(f"Loaded {len(games)} games")
+    games = []
+    games.extend(aggregate_pgn_games("data/pgn/puzzles/", max_games-len(games)))
+    games.extend(aggregate_pgn_games("data/pgn/", max_games-len(games)))
     random.shuffle(games)
     print("shuffled games")
     # Process the game
-    generator = ChessTrainingDataGenerator(min_elo=2000)
+    generator = ChessTrainingDataGenerator()
 
-    all_training_data = []
+    inputs_mmap = np.memmap(f'{mmap_filename}_inputs.dat', dtype=np.float32, mode='w+',
+                            shape=(estimated_positions_count, 19, 8, 8))
+    outputs_mmap = np.memmap(f'{mmap_filename}_outputs.dat', dtype=np.float32, mode='w+', shape=(estimated_positions_count, 4096))
 
+    metadata = {
+        'move_uci': [],
+        'fen': [],
+        'move_number': [],
+        # Add other metadata fields as needed
+    }
+    idx = 0
     for i, game in enumerate(games):
         if i % 100 == 0:
             print(f"Processing game {i + 1}/{len(games)}")
-
         try:
             training_data = generator.process_pgn_string(game)
-            all_training_data.extend(training_data)
+            for item in training_data:
+                if idx >= estimated_positions_count:
+                    if fail_if_more_positions_available:
+                        raise Exception(f"estimated {estimated_positions_count} but we actually have more examples")
+                    else:
+                        break
+                inputs_mmap[idx] = item['input']
+                outputs_mmap[idx] = item['output']
+                metadata['move_uci'].append(item['move_uci'])
+                metadata['fen'].append(item['fen'])
+                metadata['move_number'].append(item['move_number'])
+                idx += 1
+                if idx % 100_000 == 0:
+                    print(f"Flushing to mmap game {idx}")
+                    inputs_mmap.flush()
+                    outputs_mmap.flush()
         except Exception as e:
             print(f"Error processing game {i}: {e}")
             continue
 
-    print(f"Generating {len(all_training_data)} training examples in {pkl_filename}")
-    random.shuffle(all_training_data)
-    print("shuffled all_training_data")
-    # Save training data
-    with open(pkl_filename, 'wb') as f:
-        pickle.dump(all_training_data, f)
-    print(f"Generated {len(all_training_data)} training examples in {pkl_filename}")
-    convert_pickle_to_memmap(pkl_filename, pkl_filename.replace(".pkl", ""))
-    print(f"moved {pkl_filename} to memmap files")
+    # Optionally, trim arrays if you overestimated num_examples
+    inputs_mmap.flush()
+    outputs_mmap.flush()
+
+    # Save metadata and actual length
+    np.savez(f'{mmap_filename}_meta.npz', **metadata, length=idx)
+    print(f"Generated {idx} training examples in {mmap_filename}")
+    del inputs_mmap
+    del outputs_mmap
+    gc.collect()
 

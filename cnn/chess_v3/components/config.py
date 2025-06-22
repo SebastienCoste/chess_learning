@@ -4,6 +4,7 @@ TRAINING_CONFIG = {
     "num_epoch": 200,
     "device": "cuda",
     "kernel_size": 3,
+    "spatial_kernel_size": 3,
     "input_channels": INPUT_CHANNEL,
     "board_size": 8,
     "batch_size": 1024,  # To be adjusted. 128 is way too small5
@@ -12,8 +13,10 @@ TRAINING_CONFIG = {
     "learning_rate": 0.001,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
     "scheduler_type": 'cosine_annealing', #'reduce_on_plateau'
-    "early_stopping_patience": 150,
+    "early_stopping_patience": 10,
     "mixed_precision": True,
+    "gradient_clipping": 0.5, #Reduced from 1.0 because of gradient instability
+    "use_CNN_v2": True, #Use the new architecture
     "config": {
             'input_channels': INPUT_CHANNEL,
             'board_size': 8,
