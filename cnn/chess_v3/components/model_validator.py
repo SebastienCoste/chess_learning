@@ -74,6 +74,8 @@ class ModelValidator:
             # Forward pass
             with torch.no_grad():
                 output = model(dummy_input)
+            if output is None:
+                raise Exception("Model returned None output!")
 
             test_results['success'] = True
             test_results['output_shape'] = tuple(output.shape)
@@ -82,6 +84,7 @@ class ModelValidator:
             test_results['device'] = device
             if device == 'cuda':
                 test_results['memory_usage'] = torch.cuda.memory_allocated() / 1024 ** 2  # MB
+
 
         except Exception as e:
             test_results['error'] = str(e)

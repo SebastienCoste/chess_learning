@@ -166,7 +166,7 @@ def main():
     print("Commands: Type moves like 'e4', 'Nf3', or 'quit' to exit")
     move_count = 0
     # Game loop
-    opening = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
+    opening = [] #["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
     while not board.is_game_over():
         if move_count < len(opening):
             move = board.parse_san(opening[move_count])

@@ -53,3 +53,55 @@ class ResidualBlock(nn.Module):
         out = self.activation(out)
 
         return out
+
+"""
+Squeeze-and-Excitation (SE) blocks enhance residual connections by recalibrating channel-wise feature responses. 
+This improves gradient flow and feature representation by explicitly modeling interdependencies between channels.
+"""
+class SEResidualBlock(nn.Module):
+    def __init__(self, channels, reduction_ratio=16):
+        super(SEResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
+
+        # Squeeze-and-Excitation block
+        self.se = SqueezeExcitation(channels, reduction_ratio)
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        # Apply SE block
+        out = self.se(out)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class SqueezeExcitation(nn.Module):
+    def __init__(self, channels, reduction_ratio=16):
+        super(SqueezeExcitation, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction_ratio),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction_ratio, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        batch, channels, _, _ = x.size()
+        y = self.avg_pool(x).view(batch, channels)
+        y = self.fc(y).view(batch, channels, 1, 1)
+        return x * y
