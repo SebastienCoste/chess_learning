@@ -2,7 +2,7 @@
 __Understanding what happens when a computer learns to play chess, explained for everyone__
 
 ## Chapter 1: The Multi-Level Pattern Detective
-Imagine you're looking at a chess board and trying to understand what's happening. You might first look at individual pieces and their immediate surroundings, then step back to see bigger patterns across the whole board. My chess AI does something similar, but it does both at the same time using what we call a "multi-scale detector."
+Imagine you're looking at a chess board and trying to understand what's happening. You might first look at individual pieces and their immediate surroundings, then step back to see bigger patterns across the whole board. This chess AI does something similar, but it does both at the same time using what we call a "multi-scale detector".
 
 When the AI receives a chess position (think of it as a snapshot of the board at any moment), it immediately starts examining the position through two different "lenses" simultaneously. The first lens is like a magnifying glass that looks very closely at each square and its immediate neighbors. This helps spot things like whether a piece is under attack, if pieces are lined up in rows, or if there are immediate threats between nearby squares.
 
