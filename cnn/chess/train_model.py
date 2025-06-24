@@ -1,4 +1,5 @@
 import time
+import platform
 
 import torch.nn as nn
 import torch.optim as optim
@@ -23,7 +24,7 @@ from cnn.chess.components.utils.WandbLogger import EfficientBatchLogger
 from cnn.chess.components.cnn.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.cnn.modules.focal_loss import FocalLoss
-from cnn.chess.components.data_prep.mmap_dataset import MemmapChessDataset
+from cnn.chess.components.data_prep.mmap_dataset import MemmapChessDataset, MemmapChessDatasetWindows
 from cnn.chess.components.utils.module_utils import centralize_gradient, mixup_data, mixup_criterion
 from generate_data import create_optimized_dataloaders
 from cnn.chess.components.training.model_validator import ModelValidator
@@ -510,9 +511,9 @@ def create_enhanced_chess_model_with_validation(config=None):
 # Example usage with comprehensive setup
 if __name__ == "__main__":
     # Set spawn method explicitly (Windows default, but be explicit)
-    mp.set_start_method('spawn', force=True)
+    # mp.set_start_method('spawn', force=True)
     # mmap_file = 'data/mvl_train_data' #MVL games only, for shorter epochs
-    train_type = "all_train_data_with_puzzles"
+    train_type = "all_train_data_with_puzzles_v2"
     mmap_file = f'data/{train_type}'
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
@@ -524,8 +525,15 @@ if __name__ == "__main__":
     # Example training setup (requires actual data loaders)
     # training_data = load_chess_training_data(pkl_file)
 
-    dataset = MemmapChessDataset(mmap_file)
-    print(f"Loaded training data from {mmap_file}")
+    if platform.system() == 'Windows':
+        mp.set_start_method('spawn', force=True)
+        dataset = MemmapChessDatasetWindows(mmap_file)
+    else:
+        dataset = MemmapChessDataset(mmap_file)
+
+    #Alternative:
+    #dataset = CachedMemmapDataset(mmap_file)
+    print(f"Loaded training data from {mmap_file} on {platform.system()}")
     train_loader, val_loader = create_optimized_dataloaders(dataset, batch_size=TRAINING_CONFIG["batch_size"])
 
     # train_loader, val_loader = create_chess_data_loaders(
@@ -535,13 +543,6 @@ if __name__ == "__main__":
     #     num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
     # )
 
-    print(f"Reviewing device of data loaders from {mmap_file}")
-    d, t = next(iter(val_loader))
-    print(f"pre-training val_loader: Data {len(d)} device: {d.device}")
-    print(f"pre-training val_loader: Target {len(t)} device: {t.device}")
-    d, t = next(iter(train_loader))
-    print(f"pre-training train_loader: Data {len(d)} device: {d.device}")
-    print(f"pre-training train_loader: Target {len(t)} device: {t.device}")
 
 
     # Initialize trainer with W&B integration
