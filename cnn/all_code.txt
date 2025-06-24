@@ -1,6 +1,6 @@
 
 
-# --- START OF FILE: components\board\chess_engine.py ---
+# --- START OF FILE: chess\components\board\chess_engine.py ---
 
 import torch
 import chess
@@ -187,17 +187,17 @@ class SimpleChessEngine:
         except Exception as e:
             return {"error": f"Analysis failed: {e}"}
 
-# --- END OF FILE: components\board\chess_engine.py ---
+# --- END OF FILE: chess\components\board\chess_engine.py ---
 
 
-# --- START OF FILE: components\cnn\chess_cnn.py ---
+# --- START OF FILE: chess\components\cnn\chess_cnn.py ---
 
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
 
 from cnn.chess.components.config import TRAINING_CONFIG
-from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.mish_activation import MishActivation
 from cnn.chess.components.cnn.modules.residual_block import ResidualBlock
 from cnn.chess.components.cnn.modules.spatial_attention import SpatialChannelAttention
 from cnn.chess.components.cnn.modules.chess_transformer_block import ChessTransformerBlock
@@ -362,10 +362,10 @@ class EnhancedChessCNN(nn.Module):
         logits = logits.view(logits.size(0), 64, 64)
         probabilities = F.softmax(logits.view(logits.size(0), -1), dim=1)
         return probabilities.view(logits.size(0), 64, 64)
-# --- END OF FILE: components\cnn\chess_cnn.py ---
+# --- END OF FILE: chess\components\cnn\chess_cnn.py ---
 
 
-# --- START OF FILE: components\cnn\chess_cnn_v2.py ---
+# --- START OF FILE: chess\components\cnn\chess_cnn_v2.py ---
 
 import torch.nn.functional as F
 import torch.nn as nn
@@ -373,7 +373,7 @@ import torch
 
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.cnn.modules.dense_block import DenseBlock, TransitionLayer
-from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.mish_activation import MishActivation
 from cnn.chess.components.cnn.modules.multi_scale_feature_extraction import MultiScaleConv
 from cnn.chess.components.cnn.modules.residual_block import SEResidualBlock
 from cnn.chess.components.cnn.modules.spatial_attention import SpatialAttention, SimplifiedSelfAttention
@@ -384,7 +384,7 @@ from cnn.chess.components.cnn.modules.stochastic_depth import StochasticDepth
 def get_activation_function(activation_name='gelu'):
     """Factory function to get activation functions."""
     activations = {
-        'relu': nn.ReLU,
+        'relu': nn.ReLU(inplace=True),
         'gelu': nn.GELU,
         'mish': MishActivation,
         'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
@@ -441,7 +441,7 @@ class EnhancedChessCNNV2(nn.Module):
         self.transition1 = TransitionLayer(in_channels, in_channels // 2)
 
         # SE-ResNet block
-        self.se_block = SEResidualBlock(in_channels // 2, activation_fn)
+        self.se_block = SEResidualBlock(in_channels // 2, activation_fn = activation_fn)
 
         # Spatial attention
         self.spatial_attn = SpatialAttention()
@@ -532,38 +532,10 @@ class EnhancedChessCNNV2(nn.Module):
         logits = logits.view(logits.size(0), 64, 64)
         probabilities = F.softmax(logits.view(logits.size(0), -1), dim=1)
         return probabilities.view(logits.size(0), 64, 64)
-# --- END OF FILE: components\cnn\chess_cnn_v2.py ---
+# --- END OF FILE: chess\components\cnn\chess_cnn_v2.py ---
 
 
-# --- START OF FILE: components\cnn\data_manip\mish_activation.py ---
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class MishActivation(nn.Module):
-    """
-    Mish activation function implementation.
-    Mish(x) = x * tanh(softplus(x))
-    """
-
-    def __init__(self):
-        super().__init__()
-        # Use built-in Mish if available (PyTorch 1.9+)
-        if hasattr(F, 'mish'):
-            self.act = F.mish
-        else:
-            self.act = self._mish_implementation
-
-    def _mish_implementation(self, x):
-        return x * torch.tanh(F.softplus(x))
-
-    def forward(self, x):
-        return self.act(x)
-# --- END OF FILE: components\cnn\data_manip\mish_activation.py ---
-
-
-# --- START OF FILE: components\cnn\modules\chess_transformer_block.py ---
+# --- START OF FILE: chess\components\cnn\modules\chess_transformer_block.py ---
 
 import torch.nn as nn
 
@@ -602,10 +574,10 @@ class ChessTransformerBlock(nn.Module):
         x = self.norm2(x + ff_out)
 
         return x
-# --- END OF FILE: components\cnn\modules\chess_transformer_block.py ---
+# --- END OF FILE: chess\components\cnn\modules\chess_transformer_block.py ---
 
 
-# --- START OF FILE: components\cnn\modules\dense_block.py ---
+# --- START OF FILE: chess\components\cnn\modules\dense_block.py ---
 
 import torch
 import torch.nn as nn
@@ -647,10 +619,10 @@ class TransitionLayer(nn.Module):
     def forward(self, x):
         return self.transition(x)
 
-# --- END OF FILE: components\cnn\modules\dense_block.py ---
+# --- END OF FILE: chess\components\cnn\modules\dense_block.py ---
 
 
-# --- START OF FILE: components\cnn\modules\focal_loss.py ---
+# --- START OF FILE: chess\components\cnn\modules\focal_loss.py ---
 
 import torch
 import torch.nn as nn
@@ -689,10 +661,38 @@ class ClassBalancedLoss(nn.Module):
     def forward(self, inputs, targets):
         return F.cross_entropy(inputs, targets, weight=self.weights.to(inputs.device))
 
-# --- END OF FILE: components\cnn\modules\focal_loss.py ---
+# --- END OF FILE: chess\components\cnn\modules\focal_loss.py ---
 
 
-# --- START OF FILE: components\cnn\modules\multi_scale_feature_extraction.py ---
+# --- START OF FILE: chess\components\cnn\modules\mish_activation.py ---
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MishActivation(nn.Module):
+    """
+    Mish activation function implementation.
+    Mish(x) = x * tanh(softplus(x))
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Use built-in Mish if available (PyTorch 1.9+)
+        if hasattr(F, 'mish'):
+            self.act = F.mish
+        else:
+            self.act = self._mish_implementation
+
+    def _mish_implementation(self, x):
+        return x * torch.tanh(F.softplus(x))
+
+    def forward(self, x):
+        return self.act(x)
+# --- END OF FILE: chess\components\cnn\modules\mish_activation.py ---
+
+
+# --- START OF FILE: chess\components\cnn\modules\multi_scale_feature_extraction.py ---
 
 import torch
 import torch.nn as nn
@@ -717,10 +717,10 @@ class MultiScaleConv(nn.Module):
         out = self.relu(out)
         return out
 
-# --- END OF FILE: components\cnn\modules\multi_scale_feature_extraction.py ---
+# --- END OF FILE: chess\components\cnn\modules\multi_scale_feature_extraction.py ---
 
 
-# --- START OF FILE: components\cnn\modules\positional_encoding.py ---
+# --- START OF FILE: chess\components\cnn\modules\positional_encoding.py ---
 
 import torch
 import torch.nn as nn
@@ -760,10 +760,10 @@ class PositionalEncoding2D(nn.Module):
     def forward(self, x):
         x = x.to(self.device)
         return x + self.pe[:, :x.size(1), :x.size(2), :x.size(3)]
-# --- END OF FILE: components\cnn\modules\positional_encoding.py ---
+# --- END OF FILE: chess\components\cnn\modules\positional_encoding.py ---
 
 
-# --- START OF FILE: components\cnn\modules\residual_block.py ---
+# --- START OF FILE: chess\components\cnn\modules\residual_block.py ---
 
 import torch.nn as nn
 
@@ -873,10 +873,10 @@ class SqueezeExcitation(nn.Module):
         y = self.fc(y).view(batch, channels, 1, 1)
         return x * y
 
-# --- END OF FILE: components\cnn\modules\residual_block.py ---
+# --- END OF FILE: chess\components\cnn\modules\residual_block.py ---
 
 
-# --- START OF FILE: components\cnn\modules\spatial_attention.py ---
+# --- START OF FILE: chess\components\cnn\modules\spatial_attention.py ---
 
 import torch
 import torch.nn as nn
@@ -992,10 +992,10 @@ class SpatialAttention(nn.Module):
 
         # Apply spatial attention
         return x * self.sigmoid(y)
-# --- END OF FILE: components\cnn\modules\spatial_attention.py ---
+# --- END OF FILE: chess\components\cnn\modules\spatial_attention.py ---
 
 
-# --- START OF FILE: components\cnn\modules\stochastic_depth.py ---
+# --- START OF FILE: chess\components\cnn\modules\stochastic_depth.py ---
 
 import torch
 import torch.nn as nn
@@ -1021,10 +1021,10 @@ class StochasticDepth(nn.Module):
         # Scale the kept activations
         return x * random_tensor / keep_prob
 
-# --- END OF FILE: components\cnn\modules\stochastic_depth.py ---
+# --- END OF FILE: chess\components\cnn\modules\stochastic_depth.py ---
 
 
-# --- START OF FILE: components\config.py ---
+# --- START OF FILE: chess\components\config.py ---
 
 INPUT_CHANNEL = 19
 
@@ -1036,7 +1036,7 @@ TRAINING_CONFIG = {
     "input_channels": INPUT_CHANNEL,
     "board_size": 8,
     "batch_size": 2048,  # To be adjusted. 128 is way too small5
-    "num_workers": 16, #8 cores, 16 virtual workers
+    "num_workers": 24, #8 cores, 16 virtual workers
     "version": "v3.0.1",
     "learning_rate": 0.001,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
@@ -1052,7 +1052,7 @@ TRAINING_CONFIG = {
             'fc_layers': [512, 256],
             'dropout_rate': 0.4, #increased from 0.3
             'batch_norm': True,
-            'activation': 'mish',
+            'activation': 'relu',
             'use_attention': True,
             'use_transformer_blocks': True,
             'num_transformer_layers': 2,
@@ -1065,10 +1065,10 @@ TRAINING_CONFIG = {
     }
 }
 
-# --- END OF FILE: components\config.py ---
+# --- END OF FILE: chess\components\config.py ---
 
 
-# --- START OF FILE: components\data_prep\mmap_dataset.py ---
+# --- START OF FILE: chess\components\data_prep\mmap_dataset.py ---
 
 import numpy as np
 import os
@@ -1139,6 +1139,34 @@ class MemmapChessDataset(Dataset):
         return self.length
 
 
+class MemmapChessDatasetWindows(Dataset):
+    def __init__(self, base_path):
+        self.base_path = base_path
+        # Load metadata but don't open files
+        meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
+        self.length = int(meta['length'])
+        self.metadata = meta
+        # Remove these instance variables:
+        # self._inputs = None
+        # self._outputs = None
+
+    def __getitem__(self, idx):
+        # Open memmap files fresh for each access
+        inputs = np.memmap(f"{self.base_path}_inputs.dat",
+                           dtype=np.float32, mode='r',
+                           shape=(self.length, 19, 8, 8))
+        outputs = np.memmap(f"{self.base_path}_outputs.dat",
+                            dtype=np.float32, mode='r',
+                            shape=(self.length, 4096))
+
+        input_tensor = torch.from_numpy(inputs[idx].copy())
+        output_tensor = torch.from_numpy(outputs[idx].copy())
+        return input_tensor, output_tensor
+
+    def __len__(self):  # Add this method
+        return self.length
+
+
 class CachedMemmapDataset(Dataset):
     def __init__(self, base_path, cache_size=10000):
         super().__init__()
@@ -1191,10 +1219,10 @@ class CachedMemmapDataset(Dataset):
 if __name__ == "__main__":
     convert_pickle_to_memmap("../data/all_train_data.pkl", "../data/all_train_data")
 
-# --- END OF FILE: components\data_prep\mmap_dataset.py ---
+# --- END OF FILE: chess\components\data_prep\mmap_dataset.py ---
 
 
-# --- START OF FILE: components\training\early_stopping.py ---
+# --- START OF FILE: chess\components\training\early_stopping.py ---
 
 class EarlyStopping:
     """Early stopping implementation to prevent overfitting."""
@@ -1221,10 +1249,10 @@ class EarlyStopping:
                 model.load_state_dict(self.best_weights)
             return True
         return False
-# --- END OF FILE: components\training\early_stopping.py ---
+# --- END OF FILE: chess\components\training\early_stopping.py ---
 
 
-# --- START OF FILE: components\training\EMA.py ---
+# --- START OF FILE: chess\components\training\EMA.py ---
 
 
 """
@@ -1264,10 +1292,10 @@ class EMA:
                 param.data = self.backup[name]
         self.backup = {}
 
-# --- END OF FILE: components\training\EMA.py ---
+# --- END OF FILE: chess\components\training\EMA.py ---
 
 
-# --- START OF FILE: components\training\model_validator.py ---
+# --- START OF FILE: chess\components\training\model_validator.py ---
 
 import torch
 import torch.nn as nn
@@ -1361,10 +1389,10 @@ class ModelValidator:
             test_results['error'] = str(e)
 
         return test_results
-# --- END OF FILE: components\training\model_validator.py ---
+# --- END OF FILE: chess\components\training\model_validator.py ---
 
 
-# --- START OF FILE: components\training\schedulers.py ---
+# --- START OF FILE: chess\components\training\schedulers.py ---
 
 import math
 
@@ -1388,10 +1416,10 @@ class CustomWarmupCosineScheduler:
 
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
-# --- END OF FILE: components\training\schedulers.py ---
+# --- END OF FILE: chess\components\training\schedulers.py ---
 
 
-# --- START OF FILE: components\utils\chess_board_utils.py ---
+# --- START OF FILE: chess\components\utils\chess_board_utils.py ---
 
 import chess
 import numpy as np
@@ -1458,10 +1486,10 @@ def board_to_tensor(board: chess.Board, flipped: bool = False) -> np.ndarray:
         tensor[18, :, :] = 1.0
 
     return tensor
-# --- END OF FILE: components\utils\chess_board_utils.py ---
+# --- END OF FILE: chess\components\utils\chess_board_utils.py ---
 
 
-# --- START OF FILE: components\utils\module_utils.py ---
+# --- START OF FILE: chess\components\utils\module_utils.py ---
 
 import torch
 import torch.nn as nn
@@ -1528,10 +1556,10 @@ def compute_grad_variance(model):
             grad_var = torch.var(param.grad.data)
             grad_var_dict[name] = grad_var.item()
     return grad_var_dict
-# --- END OF FILE: components\utils\module_utils.py ---
+# --- END OF FILE: chess\components\utils\module_utils.py ---
 
 
-# --- START OF FILE: components\utils\WandbLogger.py ---
+# --- START OF FILE: chess\components\utils\WandbLogger.py ---
 
 import wandb
 import torch
@@ -1605,10 +1633,10 @@ class EfficientBatchLogger:
         self.batch_metrics = []
         self.running_loss = 0.0
         self.batch_count = 0
-# --- END OF FILE: components\utils\WandbLogger.py ---
+# --- END OF FILE: chess\components\utils\WandbLogger.py ---
 
 
-# --- START OF FILE: download_chess_data.py ---
+# --- START OF FILE: chess\download_chess_data.py ---
 
 #!/usr/bin/env python3
 """
@@ -1850,10 +1878,10 @@ class ChessPGNDownloader:
 if __name__ == "__main__":
     downloader = ChessPGNDownloader(target_games=10000)
     games = downloader.download_all()
-# --- END OF FILE: download_chess_data.py ---
+# --- END OF FILE: chess\download_chess_data.py ---
 
 
-# --- START OF FILE: generate_data.py ---
+# --- START OF FILE: chess\generate_data.py ---
 
 import random
 import os
@@ -2139,10 +2167,10 @@ if __name__ == "__main__":
     gc.collect()
 
 
-# --- END OF FILE: generate_data.py ---
+# --- END OF FILE: chess\generate_data.py ---
 
 
-# --- START OF FILE: old\main_train.py ---
+# --- START OF FILE: chess\old\main_train.py ---
 
 #!/usr/bin/env python3
 """
@@ -2363,10 +2391,10 @@ def main():
 
 if __name__ == "__main__":
     main()
-# --- END OF FILE: old\main_train.py ---
+# --- END OF FILE: chess\old\main_train.py ---
 
 
-# --- START OF FILE: old\models-chess_cnn.py ---
+# --- START OF FILE: chess\old\models-chess_cnn.py ---
 
 import torch                     # Main PyTorch library for tensor operations
 import torch.nn as nn            # Neural network modules (layers, loss functions)
@@ -2776,10 +2804,10 @@ if __name__ == "__main__":
     # Example usage and parameter counting
     print(torch.__version__)
     create_small_cnn_model()
-# --- END OF FILE: old\models-chess_cnn.py ---
+# --- END OF FILE: chess\old\models-chess_cnn.py ---
 
 
-# --- START OF FILE: play_chess.py ---
+# --- START OF FILE: chess\play_chess.py ---
 
 #!/usr/bin/env python3
 """
@@ -3000,12 +3028,13 @@ def main():
 
 if __name__ == "__main__":
     main()
-# --- END OF FILE: play_chess.py ---
+# --- END OF FILE: chess\play_chess.py ---
 
 
-# --- START OF FILE: train_model.py ---
+# --- START OF FILE: chess\train_model.py ---
 
 import time
+import platform
 
 import torch.nn as nn
 import torch.optim as optim
@@ -3030,7 +3059,8 @@ from cnn.chess.components.utils.WandbLogger import EfficientBatchLogger
 from cnn.chess.components.cnn.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.cnn.modules.focal_loss import FocalLoss
-from cnn.chess.components.data_prep.mmap_dataset import MemmapChessDataset
+from cnn.chess.components.data_prep.mmap_dataset import MemmapChessDataset, CachedMemmapDataset, \
+    MemmapChessDatasetWindows
 from cnn.chess.components.utils.module_utils import centralize_gradient, mixup_data, mixup_criterion
 from generate_data import create_optimized_dataloaders
 from cnn.chess.components.training.model_validator import ModelValidator
@@ -3399,6 +3429,7 @@ class Trainer:
         print("=" * 80)
 
         global_step = 0
+        torch.backends.cudnn.benchmark = True
 
         for epoch in range(num_epochs):
             # Training
@@ -3518,7 +3549,7 @@ if __name__ == "__main__":
     # Set spawn method explicitly (Windows default, but be explicit)
     mp.set_start_method('spawn', force=True)
     # mmap_file = 'data/mvl_train_data' #MVL games only, for shorter epochs
-    train_type = "all_train_data_with_puzzles"
+    train_type = "all_train_data_with_puzzles_v2"
     mmap_file = f'data/{train_type}'
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
@@ -3530,8 +3561,14 @@ if __name__ == "__main__":
     # Example training setup (requires actual data loaders)
     # training_data = load_chess_training_data(pkl_file)
 
-    dataset = MemmapChessDataset(mmap_file)
-    print(f"Loaded training data from {mmap_file}")
+    if platform.system() == 'Windows':
+        dataset = MemmapChessDatasetWindows(mmap_file)
+    else:
+        dataset = MemmapChessDataset(mmap_file)
+
+    #Alternative:
+    #dataset = CachedMemmapDataset(mmap_file)
+    print(f"Loaded training data from {mmap_file} on {platform.system()}")
     train_loader, val_loader = create_optimized_dataloaders(dataset, batch_size=TRAINING_CONFIG["batch_size"])
 
     # train_loader, val_loader = create_chess_data_loaders(
@@ -3541,13 +3578,6 @@ if __name__ == "__main__":
     #     num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
     # )
 
-    print(f"Reviewing device of data loaders from {mmap_file}")
-    d, t = next(iter(val_loader))
-    print(f"pre-training val_loader: Data {len(d)} device: {d.device}")
-    print(f"pre-training val_loader: Target {len(t)} device: {t.device}")
-    d, t = next(iter(train_loader))
-    print(f"pre-training train_loader: Data {len(d)} device: {d.device}")
-    print(f"pre-training train_loader: Target {len(t)} device: {t.device}")
 
 
     # Initialize trainer with W&B integration
@@ -3583,4 +3613,118 @@ if __name__ == "__main__":
 
     print("\n✅ Enhanced Chess CNN setup completed!")
 
-# --- END OF FILE: train_model.py ---
+# --- END OF FILE: chess\train_model.py ---
+
+
+# --- START OF FILE: generate_one_txt.py ---
+
+import os
+from pathlib import Path
+
+def concatenate_py_files(source_folder, output_file):
+    """
+    Concatenate all .py files from source_folder (recursively) into a single output file.
+    Each file's content is separated by a header with its original path.
+    """
+    source_path = Path(source_folder)
+    py_files = sorted(source_path.rglob("*.py"))  # Sorted for consistent order
+
+    with open(output_file, "w", encoding="utf-8") as outfile:
+        for py_file in py_files:
+            header = f"\n\n# --- START OF FILE: {py_file.relative_to(source_path)} ---\n\n"
+            outfile.write(header)
+            try:
+                with open(py_file, "r", encoding="utf-8") as infile:
+                    outfile.write(infile.read())
+            except Exception as e:
+                outfile.write(f"# Could not read {py_file}: {e}\n")
+            footer = f"\n# --- END OF FILE: {py_file.relative_to(source_path)} ---\n"
+            outfile.write(footer)
+
+    print(f"All .py files have been concatenated into '{output_file}'.")
+
+def main():
+    source_folder = input("Enter the path to the source folder containing .py files: ").strip()
+    output_file = input("Enter the path for the output file (e.g., all_code.txt): ").strip()
+    if not os.path.exists(source_folder):
+        print(f"Error: Source folder '{source_folder}' does not exist.")
+        return
+    concatenate_py_files(source_folder, output_file)
+
+if __name__ == "__main__":
+    main()
+
+# --- END OF FILE: generate_one_txt.py ---
+
+
+# --- START OF FILE: generate_txt.py ---
+
+import os
+import shutil
+from pathlib import Path
+
+
+def flatten_py_to_txt(source_folder, destination_folder):
+    """
+    Converts all .py files in source_folder (including subfolders) to .txt files
+    and places them in a flattened structure in destination_folder.
+
+    Args:
+        source_folder (str): Path to the source folder containing .py files
+        destination_folder (str): Path to the destination folder for .txt files
+    """
+
+    # Create destination folder if it doesn't exist
+    os.makedirs(destination_folder, exist_ok=True)
+
+    # Convert to Path objects for easier manipulation
+    source_path = Path(source_folder)
+    dest_path = Path(destination_folder)
+
+    # Counter for handling duplicate filenames
+    file_counter = {}
+
+    # Walk through all files in source folder and subfolders
+    for py_file in source_path.rglob("*.py"):
+        # Get the filename without extension
+        base_name = py_file.stem
+
+        # Handle duplicate filenames by adding a counter
+        if base_name in file_counter:
+            file_counter[base_name] += 1
+            txt_filename = f"{base_name}_{file_counter[base_name]}.txt"
+        else:
+            file_counter[base_name] = 0
+            txt_filename = f"{base_name}.txt"
+
+        # Create destination file path
+        dest_file = dest_path / txt_filename
+
+        try:
+            # Copy the file content from .py to .txt
+            shutil.copy2(py_file, dest_file)
+            print(f"Converted: {py_file} -> {dest_file}")
+        except Exception as e:
+            print(f"Error converting {py_file}: {e}")
+
+
+def main():
+    # Get input from user
+    source_folder = input("Enter the path to the source folder containing .py files: ").strip()
+    destination_folder = input("Enter the path to the destination folder for .txt files: ").strip()
+
+    # Validate source folder exists
+    if not os.path.exists(source_folder):
+        print(f"Error: Source folder '{source_folder}' does not exist.")
+        return
+
+    # Convert files
+    print(f"\nConverting .py files from '{source_folder}' to .txt files in '{destination_folder}'...")
+    flatten_py_to_txt(source_folder, destination_folder)
+    print("\nConversion completed!")
+
+
+if __name__ == "__main__":
+    main()
+
+# --- END OF FILE: generate_txt.py ---

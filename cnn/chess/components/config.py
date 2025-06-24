@@ -24,7 +24,7 @@ TRAINING_CONFIG = {
             'fc_layers': [512, 256],
             'dropout_rate': 0.4, #increased from 0.3
             'batch_norm': True,
-            'activation': 'mish',
+            'activation': 'relu',
             'use_attention': True,
             'use_transformer_blocks': True,
             'num_transformer_layers': 2,

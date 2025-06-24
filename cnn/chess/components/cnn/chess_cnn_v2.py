@@ -4,7 +4,7 @@ import torch
 
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.cnn.modules.dense_block import DenseBlock, TransitionLayer
-from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.mish_activation import MishActivation
 from cnn.chess.components.cnn.modules.multi_scale_feature_extraction import MultiScaleConv
 from cnn.chess.components.cnn.modules.residual_block import SEResidualBlock
 from cnn.chess.components.cnn.modules.spatial_attention import SpatialAttention, SimplifiedSelfAttention
@@ -15,7 +15,7 @@ from cnn.chess.components.cnn.modules.stochastic_depth import StochasticDepth
 def get_activation_function(activation_name='gelu'):
     """Factory function to get activation functions."""
     activations = {
-        'relu': nn.ReLU,
+        'relu': nn.ReLU(inplace=True),
         'gelu': nn.GELU,
         'mish': MishActivation,
         'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
@@ -72,7 +72,7 @@ class EnhancedChessCNNV2(nn.Module):
         self.transition1 = TransitionLayer(in_channels, in_channels // 2)
 
         # SE-ResNet block
-        self.se_block = SEResidualBlock(in_channels // 2, activation_fn)
+        self.se_block = SEResidualBlock(in_channels // 2, activation_fn = activation_fn)
 
         # Spatial attention
         self.spatial_attn = SpatialAttention()

@@ -67,53 +67,30 @@ class MemmapChessDataset(Dataset):
         return self.length
 
 
-class CachedMemmapDataset(Dataset):
-    def __init__(self, base_path, cache_size=10000):
-        super().__init__()
+
+
+class MemmapChessDatasetWindows(Dataset):
+    def __init__(self, base_path):
         self.base_path = base_path
-        self.cache_size = cache_size
-        self.cache = {}
-        self.access_count = {}
-
-        # Don't store file handles - these will be opened per-worker
-        self._inputs = None
-        self._outputs = None
-
-        # Load metadata
-        meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
-        self.length = int(meta['length'])
-
-    def _ensure_loaded(self):
-        """Lazy loading of memory-mapped files in each worker process"""
-        if self._inputs is None:
-            self._inputs = np.memmap(f"{self.base_path}_inputs.dat",
-                                     dtype=np.float32, mode='r',
-                                     shape=(self.length, 19, 8, 8))
-            self._outputs = np.memmap(f"{self.base_path}_outputs.dat",
-                                      dtype=np.float32, mode='r',
-                                      shape=(self.length, 4096))
+        # Load metadata without keeping file handles
+        meta_path = f"{base_path}_meta.npz"
+        self.length = int(np.load(meta_path, allow_pickle=True)['length'])
+        # No file handles stored at class level!
 
     def __getitem__(self, idx):
-        # Check cache first
-        if idx in self.cache:
-            self.access_count[idx] = self.access_count.get(idx, 0) + 1
-            return self.cache[idx]
+        # Open memmap files fresh for each access
+        input_data = np.memmap(f"{self.base_path}_inputs.dat",
+                               dtype=np.float32, mode='r',
+                               shape=(self.length, 19, 8, 8))[idx].copy()
 
-        # Load from disk if not cached
-        if not hasattr(self, '_inputs'):
-            self._ensure_loaded()
+        output_data = np.memmap(f"{self.base_path}_outputs.dat",
+                                dtype=np.float32, mode='r',
+                                shape=(self.length, 4096))[idx].copy()
 
-        item = (
-            torch.from_numpy(self._inputs[idx].copy()),
-            torch.from_numpy(self._outputs[idx].copy())
-        )
+        return torch.from_numpy(input_data), torch.from_numpy(output_data)
 
-        # Cache frequently accessed items
-        if len(self.cache) < self.cache_size:
-            self.cache[idx] = item
-            self.access_count[idx] = 1
-
-        return item
+    def __len__(self):
+        return self.length
 
 
 if __name__ == "__main__":
