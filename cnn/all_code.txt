@@ -1,0 +1,3586 @@
+
+
+# --- START OF FILE: components\board\chess_engine.py ---
+
+import torch
+import chess
+import numpy as np
+from typing import Optional
+
+from cnn.chess.components.utils.chess_board_utils import board_to_tensor
+from cnn.chess.components.cnn.chess_cnn import EnhancedChessCNN
+from cnn.chess.components.cnn.chess_cnn_v2 import EnhancedChessCNNV2
+from cnn.chess.components.config import TRAINING_CONFIG
+
+
+class SimpleChessEngine:
+    def __init__(self, model_path=None, version = 2):
+        self.model_path = model_path
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if model_path:
+            print(f"Loading model from: {model_path}")
+            try:
+                # Load the model architecture (you'll need to import your actual model class)
+
+                # Initialize model with same config as training
+                if version == 2:
+                    self.model = (EnhancedChessCNNV2(**TRAINING_CONFIG["config"]))
+                elif version == 1:
+                    self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
+                else:
+                    raise ValueError("Invalid version")
+
+                # Load trained weights
+                checkpoint = torch.load(model_path, map_location=self.device)
+
+                # Handle different checkpoint formats
+                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    print(f"Loaded model from epoch {checkpoint.get('epoch', 'unknown')}")
+                else:
+                    self.model.load_state_dict(checkpoint)
+
+                self.model.to(self.device)
+                self.model.eval()
+                print(f"Model successfully loaded on {self.device}")
+
+            except Exception as e:
+                print(f"Error loading model: {e}")
+                print("Falling back to random move generator")
+                self.model = None
+        else:
+            print("No model file provided. Using random move generator for demo.")
+            self.model = None
+
+    def idx_to_move(self, move_idx: int, board: chess.Board) -> Optional[chess.Move]:
+        """
+        Convert model output index to chess move.
+        Move index = from_square * 64 + to_square
+        """
+        from_square = move_idx // 64
+        to_square = move_idx % 64
+
+        # Create the move
+        move = chess.Move(from_square, to_square)
+
+        # Handle promotion moves (assume queen promotion for simplicity)
+        if board.piece_at(from_square) and board.piece_at(from_square).piece_type == chess.PAWN:
+            # Check if it's a promotion move
+            if (board.turn == chess.WHITE and to_square >= 56) or (board.turn == chess.BLACK and to_square <= 7):
+                move = chess.Move(from_square, to_square, promotion=chess.QUEEN)
+
+        return move if move in board.legal_moves else None
+
+    def get_top_k_moves(self, board: chess.Board, k: int = 5) -> list:
+        """
+        Get top-k move predictions from the model.
+        """
+        if self.model is None:
+            return []
+
+        try:
+            # Get model predictions
+            x = board_to_tensor(board)
+            with torch.no_grad():
+                logits = self.model(x)
+                probabilities = torch.softmax(logits, dim=1)
+
+            # Get top-k predictions
+            top_k_values, top_k_indices = torch.topk(probabilities, k, dim=1)
+
+            moves_with_probs = []
+            for i in range(k):
+                move_idx = top_k_indices[0][i].item()
+                prob = top_k_values[0][i].item()
+                move = self.idx_to_move(move_idx, board)
+
+                if move and move in board.legal_moves:
+                    moves_with_probs.append((move, prob))
+
+            return moves_with_probs
+
+        except Exception as e:
+            print(f"Error in get_top_k_moves: {e}")
+            return []
+
+    def get_model_move(self, board: chess.Board) -> Optional[chess.Move]:
+        """
+        Get the best move from the model, with fallback strategies.
+        """
+        if self.model is None:
+            return self._get_random_move(board)
+
+        try:
+            # Get model predictions
+            x = board_to_tensor(board)
+            # Convert to PyTorch tensor
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x).float()
+            x = x.to(self.device)
+            # Add batch dimension if needed
+            if len(x.shape) == 2:  # If it's just [height, width]
+                x = x.unsqueeze(0)  # Make it [1, height, width]
+            elif len(x.shape) == 3:  # If it's [channels, height, width]
+                x = x.unsqueeze(0)  # Make it [1, channels, height, width]
+            with torch.no_grad():
+                logits = self.model(x)
+                probabilities = torch.softmax(logits, dim=1)
+
+            # Try top moves until we find a legal one
+            top_k_values, top_k_indices = torch.topk(probabilities, 10, dim=1)
+
+            for i in range(10):
+                move_idx = top_k_indices[0][i].item()
+                prob = top_k_values[0][i].item()
+                move = self.idx_to_move(move_idx, board)
+
+                if move and move in board.legal_moves:
+                    print(f"AI (model) selects: {board.san(move)} (confidence: {prob:.3f})")
+                    return move
+
+            # If no top-10 moves are legal, fall back to random legal move
+            print("AI model's top predictions were illegal, selecting random legal move.")
+            return self._get_random_move(board)
+
+        except Exception as e:
+            print(f"Error in model inference: {e}")
+            print("Falling back to random move.")
+            return self._get_random_move(board)
+
+    def _get_random_move(self, board: chess.Board) -> Optional[chess.Move]:
+        """Fallback random move generator."""
+        legal_moves = list(board.legal_moves)
+        if legal_moves:
+            move = np.random.choice(legal_moves)
+            print(f"AI (random) selects: {board.san(move)}")
+            return move
+        return None
+
+    def get_move_analysis(self, board: chess.Board) -> dict:
+        """
+        Provide detailed analysis of the current position.
+        """
+        if self.model is None:
+            return {"error": "No model loaded"}
+
+        try:
+            top_moves = self.get_top_k_moves(board, k=5)
+
+            analysis = {
+                "position_fen": board.fen(),
+                "to_move": "White" if board.turn else "Black",
+                "legal_moves_count": len(list(board.legal_moves)),
+                "top_moves": []
+            }
+
+            for move, prob in top_moves:
+                analysis["top_moves"].append({
+                    "move": board.san(move),
+                    "uci": move.uci(),
+                    "probability": f"{prob:.3f}",
+                    "percentage": f"{prob * 100:.1f}%"
+                })
+
+            return analysis
+
+        except Exception as e:
+            return {"error": f"Analysis failed: {e}"}
+
+# --- END OF FILE: components\board\chess_engine.py ---
+
+
+# --- START OF FILE: components\cnn\chess_cnn.py ---
+
+import torch.nn.functional as F
+import torch.nn as nn
+import torch
+
+from cnn.chess.components.config import TRAINING_CONFIG
+from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.residual_block import ResidualBlock
+from cnn.chess.components.cnn.modules.spatial_attention import SpatialChannelAttention
+from cnn.chess.components.cnn.modules.chess_transformer_block import ChessTransformerBlock
+from cnn.chess.components.cnn.modules.positional_encoding import PositionalEncoding2D
+
+
+def get_activation_function(activation_name='gelu'):
+    """Factory function to get activation functions."""
+    activations = {
+        'relu': nn.ReLU,
+        'gelu': nn.GELU,
+        'mish': MishActivation,
+        'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
+    }
+    return activations.get(activation_name.lower(), nn.GELU)
+
+class EnhancedChessCNN(nn.Module):
+    """
+    Enhanced Convolutional Neural Network for chess move prediction.
+    Incorporates residual connections, modern activations, attention mechanisms,
+    and transformer-inspired components with comprehensive W&B integration.
+    """
+
+    def __init__(
+            self,
+            input_channels=TRAINING_CONFIG["input_channels"],
+            board_size=TRAINING_CONFIG["board_size"],
+            conv_filters=[64, 128, 256],
+            fc_layers=[512, 256],
+            dropout_rate=0.3,
+            batch_norm=True,
+            activation='gelu',
+            use_attention=True,
+            use_transformer_blocks=True,
+            num_transformer_layers=2,
+            transformer_heads=8,
+            kernel_size = TRAINING_CONFIG["kernel_size"],
+    ):
+        super(EnhancedChessCNN, self).__init__()
+        self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
+        self.to(self.device)  # Move entire model to CUDA immediately
+        print(f"EnhancedChessCNN is initialized using device {self.device}")
+
+        self.input_channels = input_channels
+        self.board_size = board_size
+        self.conv_filters = conv_filters
+        self.fc_layers = fc_layers
+        self.dropout_rate = dropout_rate
+        self.batch_norm = batch_norm
+        self.use_attention = use_attention
+        self.use_transformer_blocks = use_transformer_blocks
+        self.kernel_size = kernel_size
+
+        # Get activation function
+        activation_fn = get_activation_function(activation)
+
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding2D(input_channels, board_size, board_size)
+        # Convolutional layers with residual blocks
+        self.conv_layers = nn.ModuleList()
+        in_channels = input_channels
+
+        for filters in conv_filters:
+            block = ResidualBlock(
+                in_channels,
+                filters,
+                activation_fn=activation_fn,
+                batch_norm=batch_norm,
+                dropout_rate=dropout_rate,
+                kernel_size=self.kernel_size,
+            )
+            self.conv_layers.append(block)
+
+            # Add attention after each residual block
+            if use_attention:
+                attention = SpatialChannelAttention(filters)
+                self.conv_layers.append(attention)
+
+            in_channels = filters
+
+        # Calculate flattened size
+        self.flattened_size = in_channels * board_size * board_size
+
+        # Transformer blocks (optional)
+        if use_transformer_blocks:
+            self.transformer_blocks = nn.ModuleList([
+                ChessTransformerBlock(
+                    embed_dim=in_channels,
+                    num_heads=transformer_heads,
+                    dropout=dropout_rate
+                ) for _ in range(num_transformer_layers)
+            ])
+
+        # Fully connected layers
+        self.fc_layers_list = nn.ModuleList()
+        in_features = self.flattened_size
+
+        for fc_size in fc_layers:
+            self.fc_layers_list.append(nn.Linear(in_features, fc_size))
+            self.fc_layers_list.append(activation_fn())
+            self.fc_layers_list.append(nn.Dropout(dropout_rate))
+            in_features = fc_size
+
+        # Output layer
+        self.output_layer = nn.Linear(in_features, 64 * 64)
+
+        # Initialize weights
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Initialize model weights using Xavier/He initialization."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        # Add positional encoding
+        x = self.pos_encoding(x)
+
+        # Convolutional layers with residual connections and attention
+        for layer in self.conv_layers:
+            x = layer(x)
+
+        # Transformer blocks (if enabled)
+        if self.use_transformer_blocks:
+            batch_size, channels, height, width = x.size()
+            # Reshape for transformer: (batch, seq_len, embed_dim)
+            x_reshaped = x.view(batch_size, channels, -1).transpose(1, 2)
+
+            for transformer in self.transformer_blocks:
+                x_reshaped = transformer(x_reshaped)
+
+            # Reshape back to conv format
+            x = x_reshaped.transpose(1, 2).view(batch_size, channels, height, width)
+
+        # Flatten
+        #can't run x = x.view(x.size(0), -1) because of:
+        # view size is not compatible with input tensor's size and stride (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
+        # so might also write x = x.contiguous().view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
+
+        # Fully connected layers
+        for layer in self.fc_layers_list:
+            x = layer(x)
+
+        # Output layer
+        x = self.output_layer(x)
+
+        return x
+
+    def get_move_probabilities(self, x):
+        """Get move probabilities with temperature scaling."""
+        logits = self.forward(x)
+        logits = logits.view(logits.size(0), 64, 64)
+        probabilities = F.softmax(logits.view(logits.size(0), -1), dim=1)
+        return probabilities.view(logits.size(0), 64, 64)
+# --- END OF FILE: components\cnn\chess_cnn.py ---
+
+
+# --- START OF FILE: components\cnn\chess_cnn_v2.py ---
+
+import torch.nn.functional as F
+import torch.nn as nn
+import torch
+
+from cnn.chess.components.config import TRAINING_CONFIG
+from cnn.chess.components.cnn.modules.dense_block import DenseBlock, TransitionLayer
+from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.multi_scale_feature_extraction import MultiScaleConv
+from cnn.chess.components.cnn.modules.residual_block import SEResidualBlock
+from cnn.chess.components.cnn.modules.spatial_attention import SpatialAttention, SimplifiedSelfAttention
+from cnn.chess.components.cnn.modules.positional_encoding import PositionalEncoding2D
+from cnn.chess.components.cnn.modules.stochastic_depth import StochasticDepth
+
+
+def get_activation_function(activation_name='gelu'):
+    """Factory function to get activation functions."""
+    activations = {
+        'relu': nn.ReLU,
+        'gelu': nn.GELU,
+        'mish': MishActivation,
+        'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
+    }
+    return activations.get(activation_name.lower(), nn.GELU)
+
+class EnhancedChessCNNV2(nn.Module):
+    """
+    Enhanced Convolutional Neural Network for chess move prediction.
+    Incorporates residual connections, modern activations, attention mechanisms,
+    and transformer-inspired components with comprehensive W&B integration.
+    """
+
+    def __init__(
+            self,
+            input_channels=TRAINING_CONFIG["input_channels"],
+            board_size=TRAINING_CONFIG["board_size"],
+            conv_filters=[64, 128, 256],
+            fc_layers=[512, 256],
+            dropout_rate=0.3,
+            batch_norm=True,
+            activation='gelu',
+            use_attention=True,
+            use_transformer_blocks=True,
+            num_transformer_layers=2,
+            transformer_heads=8,
+            kernel_size = TRAINING_CONFIG["kernel_size"],
+    ):
+        super(EnhancedChessCNNV2, self).__init__()
+        self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
+        self.to(self.device)  # Move entire model to CUDA immediately
+        print(f"EnhancedChessCNN is initialized using device {self.device}")
+
+        self.input_channels = input_channels
+        self.board_size = board_size
+        self.conv_filters = conv_filters
+        self.fc_layers = fc_layers
+        self.dropout_rate = dropout_rate
+        self.batch_norm = batch_norm
+        self.use_attention = use_attention
+        self.use_transformer_blocks = use_transformer_blocks
+        self.kernel_size = kernel_size
+
+        # Get activation function
+        activation_fn = get_activation_function(activation)
+
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding2D(input_channels, board_size, board_size)
+        # Initial convolution
+        self.initial_conv = MultiScaleConv(input_channels, 64)
+        # Dense blocks with transition layers
+        self.dense_block1 = DenseBlock(64, growth_rate=32, num_layers=4)
+        in_channels = 64 + 4 * 32  # Initial + growth_rate * num_layers
+        self.transition1 = TransitionLayer(in_channels, in_channels // 2)
+
+        # SE-ResNet block
+        self.se_block = SEResidualBlock(in_channels // 2, activation_fn)
+
+        # Spatial attention
+        self.spatial_attn = SpatialAttention()
+
+        # Simplified self-attention
+        self.self_attn = SimplifiedSelfAttention(embed_dim=96, num_heads=4) #or embed_dim = 128 ?
+
+        # Stochastic depth
+        self.stochastic_depth = StochasticDepth(drop_prob=0.1)
+
+        # Output layers
+        self.flatten = nn.Flatten()
+        #below is incorrect because of RuntimeError: mat1 and mat2 shapes cannot be multiplied (1024x1536 and 6144x4096)
+        # at x = self.fc(x)
+        #self.fc = nn.Linear((in_channels // 2) * board_size * board_size, 64 * 64)
+        # because nn.AvgPool2d(kernel_size=2, stride=2)  reduces the board_size from 8 to 4
+        #Below is the correct one but fixed
+        # self.fc = nn.Linear((in_channels // 2) * (board_size // 2) * (board_size // 2), 64 * 64)
+        # Below is the dynamic one
+        with torch.no_grad():
+            dummy_input = torch.randn(1, TRAINING_CONFIG["input_channels"], TRAINING_CONFIG["board_size"], TRAINING_CONFIG["board_size"])
+            x = dummy_input
+            #Reproducing what we have above
+            x = self.initial_conv(x)
+            x = self.dense_block1(x)
+            x = self.transition1(x)
+            identity = x
+            x = self.se_block(x)
+            x = self.stochastic_depth(x)
+            x = x + identity
+            x = self.spatial_attn(x)
+            batch, channels, height, width = x.shape
+            features = channels * height * width
+            self.fc = nn.Linear(features, 64 * 64)
+
+        # Initialize weights
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Initialize model weights using Xavier/He initialization."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        # Multi-scale feature extraction
+        x = self.initial_conv(x)
+
+        # Dense connectivity
+        x = self.dense_block1(x)
+        x = self.transition1(x)
+
+        # SE-ResNet with stochastic depth
+        identity = x
+        x = self.se_block(x)
+        x = self.stochastic_depth(x)
+        x = x + identity
+
+        # Spatial attention
+        x = self.spatial_attn(x)
+
+        # Reshape for self-attention
+        batch, channels, height, width = x.shape
+        x = x.view(batch, channels, -1).transpose(1, 2)
+
+        # Simplified self-attention
+        x = self.self_attn(x)
+
+        # Reshape back and output
+        x = x.transpose(1, 2).view(batch, channels, height, width)
+        x = self.flatten(x)
+        #print(f"Flattened shape: {x.shape}")  # Should be [batch, 1536]
+        x = self.fc(x)
+
+        return x
+
+    def get_move_probabilities(self, x):
+        """Get move probabilities with temperature scaling."""
+        logits = self.forward(x)
+        logits = logits.view(logits.size(0), 64, 64)
+        probabilities = F.softmax(logits.view(logits.size(0), -1), dim=1)
+        return probabilities.view(logits.size(0), 64, 64)
+# --- END OF FILE: components\cnn\chess_cnn_v2.py ---
+
+
+# --- START OF FILE: components\cnn\data_manip\mish_activation.py ---
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MishActivation(nn.Module):
+    """
+    Mish activation function implementation.
+    Mish(x) = x * tanh(softplus(x))
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Use built-in Mish if available (PyTorch 1.9+)
+        if hasattr(F, 'mish'):
+            self.act = F.mish
+        else:
+            self.act = self._mish_implementation
+
+    def _mish_implementation(self, x):
+        return x * torch.tanh(F.softplus(x))
+
+    def forward(self, x):
+        return self.act(x)
+# --- END OF FILE: components\cnn\data_manip\mish_activation.py ---
+
+
+# --- START OF FILE: components\cnn\modules\chess_transformer_block.py ---
+
+import torch.nn as nn
+
+class ChessTransformerBlock(nn.Module):
+    """
+    Transformer-inspired block for chess position understanding.
+    Combines self-attention with feed-forward processing.
+    """
+
+    def __init__(self, embed_dim, num_heads=8, ff_dim=None, dropout=0.1):
+        super(ChessTransformerBlock, self).__init__()
+
+        if ff_dim is None:
+            ff_dim = embed_dim * 4
+
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads,
+                                               dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+        self.feed_forward = nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, embed_dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        # Self-attention with residual connection
+        attn_out, _ = self.attention(x, x, x)
+        x = self.norm1(x + attn_out)
+
+        # Feed-forward with residual connection
+        ff_out = self.feed_forward(x)
+        x = self.norm2(x + ff_out)
+
+        return x
+# --- END OF FILE: components\cnn\modules\chess_transformer_block.py ---
+
+
+# --- START OF FILE: components\cnn\modules\dense_block.py ---
+
+import torch
+import torch.nn as nn
+
+"""
+Dense connections allow each layer to receive feature maps from all preceding layers . This encourages feature reuse, strengthens gradient flow, and increases effective depth without adding many parameters.
+"""
+class DenseBlock(nn.Module):
+    def __init__(self, in_channels, growth_rate, num_layers):
+        super(DenseBlock, self).__init__()
+        self.layers = nn.ModuleList()
+
+        for i in range(num_layers):
+            layer = nn.Sequential(
+                nn.BatchNorm2d(in_channels + i * growth_rate),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels + i * growth_rate, growth_rate, kernel_size=3, padding=1)
+            )
+            self.layers.append(layer)
+
+    def forward(self, x):
+        features = [x]
+        for layer in self.layers:
+            new_feature = layer(torch.cat(features, dim=1))
+            features.append(new_feature)
+        return torch.cat(features, dim=1)
+
+
+class TransitionLayer(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(TransitionLayer, self).__init__()
+        self.transition = nn.Sequential(
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.AvgPool2d(kernel_size=2, stride=2)
+        )
+
+    def forward(self, x):
+        return self.transition(x)
+
+# --- END OF FILE: components\cnn\modules\dense_block.py ---
+
+
+# --- START OF FILE: components\cnn\modules\focal_loss.py ---
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+"""
+Focal Loss addresses class imbalance by down-weighting well-classified examples . This is particularly useful for chess move prediction where some moves are much more common than others.
+"""
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+#For more severe class imbalance
+class ClassBalancedLoss(nn.Module):
+    def __init__(self, samples_per_class, beta=0.9999):
+        super(ClassBalancedLoss, self).__init__()
+        effective_num = 1.0 - torch.pow(beta, torch.tensor(samples_per_class))
+        weights = (1.0 - beta) / effective_num
+        self.weights = weights / weights.sum() * len(samples_per_class)
+
+    def forward(self, inputs, targets):
+        return F.cross_entropy(inputs, targets, weight=self.weights.to(inputs.device))
+
+# --- END OF FILE: components\cnn\modules\focal_loss.py ---
+
+
+# --- START OF FILE: components\cnn\modules\multi_scale_feature_extraction.py ---
+
+import torch
+import torch.nn as nn
+
+"""
+Multi-scale feature extraction captures patterns at different scales simultaneously . 
+For chess, this helps recognize both local tactical patterns (3×3 kernels) and broader strategic relationships (5×5 kernels).
+"""
+class MultiScaleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MultiScaleConv, self).__init__()
+        self.conv3x3 = nn.Conv2d(in_channels, out_channels // 2, kernel_size=3, padding=1)
+        self.conv5x5 = nn.Conv2d(in_channels, out_channels // 2, kernel_size=5, padding=2)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        out3x3 = self.conv3x3(x)
+        out5x5 = self.conv5x5(x)
+        out = torch.cat([out3x3, out5x5], dim=1)
+        out = self.bn(out)
+        out = self.relu(out)
+        return out
+
+# --- END OF FILE: components\cnn\modules\multi_scale_feature_extraction.py ---
+
+
+# --- START OF FILE: components\cnn\modules\positional_encoding.py ---
+
+import torch
+import torch.nn as nn
+import math
+
+from cnn.chess.components.config import TRAINING_CONFIG
+
+
+class PositionalEncoding2D(nn.Module):
+    """
+    2D positional encoding for chess board positions.
+    Encodes spatial relationships between squares.
+    """
+
+    def __init__(self, channels, height=8, width=8):
+        super(PositionalEncoding2D, self).__init__()
+        self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
+        print(f"PositionalEncoding2D is using device {self.device}")
+
+        pe = torch.zeros(channels, height, width)
+
+        # Create position encodings
+        for i in range(height):
+            for j in range(width):
+                for k in range(0, channels, 4):
+                    if k < channels:
+                        pe[k, i, j] = math.sin(i / (10000 ** (k / channels)))
+                    if k + 1 < channels:
+                        pe[k + 1, i, j] = math.cos(i / (10000 ** (k / channels)))
+                    if k + 2 < channels:
+                        pe[k + 2, i, j] = math.sin(j / (10000 ** (k / channels)))
+                    if k + 3 < channels:
+                        pe[k + 3, i, j] = math.cos(j / (10000 ** (k / channels)))
+
+        self.register_buffer('pe', pe.unsqueeze(0))
+
+    def forward(self, x):
+        x = x.to(self.device)
+        return x + self.pe[:, :x.size(1), :x.size(2), :x.size(3)]
+# --- END OF FILE: components\cnn\modules\positional_encoding.py ---
+
+
+# --- START OF FILE: components\cnn\modules\residual_block.py ---
+
+import torch.nn as nn
+
+class ResidualBlock(nn.Module):
+    """
+    Residual block with skip connections for improved gradient flow.
+    Implements the identity mapping approach from ResNet architecture.
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1,
+                 activation_fn=nn.GELU, batch_norm=True, dropout_rate=0.2):
+        super(ResidualBlock, self).__init__()
+
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size,
+                               stride, padding=1, bias=not batch_norm)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size,
+                               1, padding=1, bias=not batch_norm)
+
+        self.batch_norm = batch_norm
+        if batch_norm:
+            self.bn1 = nn.BatchNorm2d(out_channels)
+            self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.activation = activation_fn()
+        self.dropout = nn.Dropout2d(dropout_rate)
+
+        # Skip connection adjustment for dimension matching
+        self.skip_connection = None
+        if in_channels != out_channels or stride != 1:
+            self.skip_connection = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1, stride, bias=False),
+                nn.BatchNorm2d(out_channels) if batch_norm else nn.Identity()
+            )
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        if self.batch_norm:
+            out = self.bn1(out)
+        out = self.activation(out)
+        out = self.dropout(out)
+
+        out = self.conv2(out)
+        if self.batch_norm:
+            out = self.bn2(out)
+
+        # Apply skip connection transformation if needed
+        if self.skip_connection is not None:
+            residual = self.skip_connection(x)
+
+        # Add residual connection
+        out += residual
+        out = self.activation(out)
+
+        return out
+
+"""
+Squeeze-and-Excitation (SE) blocks enhance residual connections by recalibrating channel-wise feature responses. 
+This improves gradient flow and feature representation by explicitly modeling interdependencies between channels.
+"""
+class SEResidualBlock(nn.Module):
+    def __init__(self, channels, reduction_ratio=16, activation_fn=nn.ReLU(inplace=True)):
+        super(SEResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.activation = activation_fn
+
+        # Squeeze-and-Excitation block
+        self.se = SqueezeExcitation(channels, reduction_ratio, activation_fn)
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.activation(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        # Apply SE block
+        out = self.se(out)
+
+        out += residual
+        out = self.activation(out)
+
+        return out
+
+
+class SqueezeExcitation(nn.Module):
+    def __init__(self, channels, reduction_ratio=16, activation_fn=nn.ReLU(inplace=True)):
+        super(SqueezeExcitation, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction_ratio),
+            activation_fn,
+            nn.Linear(channels // reduction_ratio, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        batch, channels, _, _ = x.size()
+        y = self.avg_pool(x).view(batch, channels)
+        y = self.fc(y).view(batch, channels, 1, 1)
+        return x * y
+
+# --- END OF FILE: components\cnn\modules\residual_block.py ---
+
+
+# --- START OF FILE: components\cnn\modules\spatial_attention.py ---
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from cnn.chess.components.config import TRAINING_CONFIG
+
+
+class SimplifiedSelfAttention(nn.Module):
+    def __init__(self, embed_dim=128, num_heads=4):
+        super(SimplifiedSelfAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        # Reduced complexity with fewer heads
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+
+        # Stronger normalization layers around attention
+        self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # Apply normalization before attention (norm-first approach)
+        x_norm = self.norm1(x)
+
+        # Project to queries, keys, values
+        qkv = self.qkv_proj(x_norm)
+        qkv = qkv.reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # Compute attention scores
+        attn = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+        attn = F.softmax(attn, dim=-1)
+
+        # Apply attention to values
+        out = attn @ v
+        out = out.transpose(1, 2).reshape(batch_size, seq_len, self.embed_dim)
+        out = self.out_proj(out)
+
+        # Apply second normalization
+        out = self.norm2(out + x)
+
+        return out
+
+
+class SpatialChannelAttention(nn.Module):
+    """
+    Spatial attention mechanism for chess board regions.
+    Generates attention weights for each spatial location.
+    """
+
+    def __init__(self, in_channels, reduction_ratio=8):
+        super(SpatialChannelAttention, self).__init__()
+
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        # Channel attention
+        self.channel_attention = nn.Sequential(
+            nn.Linear(in_channels * 2, in_channels // reduction_ratio),
+            nn.ReLU(),
+            nn.Linear(in_channels // reduction_ratio, in_channels),
+            nn.Sigmoid()
+        )
+
+        # Spatial attention
+        self.spatial_conv = nn.Sequential(
+            nn.Conv2d(2, 1, kernel_size=7, padding=3),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        batch_size, channels, height, width = x.size()
+
+        # Channel attention
+        avg_pool = self.avg_pool(x).view(batch_size, channels)
+        max_pool = self.max_pool(x).view(batch_size, channels)
+        channel_input = torch.cat([avg_pool, max_pool], dim=1)
+        channel_weights = self.channel_attention(channel_input).view(batch_size, channels, 1, 1)
+
+        # Apply channel attention
+        x = x * channel_weights
+
+        # Spatial attention
+        avg_spatial = torch.mean(x, dim=1, keepdim=True)
+        max_spatial, _ = torch.max(x, dim=1, keepdim=True)
+        spatial_input = torch.cat([avg_spatial, max_spatial], dim=1)
+        spatial_weights = self.spatial_conv(spatial_input)
+
+        # Apply spatial attention
+        x = x * spatial_weights
+
+        return x
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=TRAINING_CONFIG["spatial_kernel_size"]):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Generate spatial attention map
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        y = torch.cat([avg_out, max_out], dim=1)
+        y = self.conv(y)
+
+        # Apply spatial attention
+        return x * self.sigmoid(y)
+# --- END OF FILE: components\cnn\modules\spatial_attention.py ---
+
+
+# --- START OF FILE: components\cnn\modules\stochastic_depth.py ---
+
+import torch
+import torch.nn as nn
+
+"""
+Stochastic depth randomly drops entire residual blocks during training, acting like dropout but at the block level . This prevents co-adaptation of layers and improves generalization, especially in deep networks.
+"""
+class StochasticDepth(nn.Module):
+    def __init__(self, drop_prob=0.1):
+        super(StochasticDepth, self).__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if not self.training or self.drop_prob == 0.:
+            return x
+
+        # Create binary mask for the entire batch
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor = random_tensor.floor()  # binarize
+
+        # Scale the kept activations
+        return x * random_tensor / keep_prob
+
+# --- END OF FILE: components\cnn\modules\stochastic_depth.py ---
+
+
+# --- START OF FILE: components\config.py ---
+
+INPUT_CHANNEL = 19
+
+TRAINING_CONFIG = {
+    "num_epoch": 200,
+    "device": "cuda",
+    "kernel_size": 3,
+    "spatial_kernel_size": 3,
+    "input_channels": INPUT_CHANNEL,
+    "board_size": 8,
+    "batch_size": 2048,  # To be adjusted. 128 is way too small5
+    "num_workers": 16, #8 cores, 16 virtual workers
+    "version": "v3.0.1",
+    "learning_rate": 0.001,
+    "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
+    "scheduler_type": 'cosine_annealing', #'reduce_on_plateau'
+    "early_stopping_patience": 10,
+    "mixed_precision": True,
+    "gradient_clipping": 0.5, #Reduced from 1.0 because of gradient instability
+    "use_CNN_v2": True, #Use the new architecture
+    "config": {
+            'input_channels': INPUT_CHANNEL,
+            'board_size': 8,
+            'conv_filters': [64, 128, 256],
+            'fc_layers': [512, 256],
+            'dropout_rate': 0.4, #increased from 0.3
+            'batch_norm': True,
+            'activation': 'mish',
+            'use_attention': True,
+            'use_transformer_blocks': True,
+            'num_transformer_layers': 2,
+            'transformer_heads': 8,
+        },
+    "cosine": {
+        "warmup_epochs": 0, #or 10 ? # Ramp up learning rate gradually
+        "min_lr": 1e-7,
+        "eta_min": 1e-7 ,     # Minimum LR for cosine annealing
+    }
+}
+
+# --- END OF FILE: components\config.py ---
+
+
+# --- START OF FILE: components\data_prep\mmap_dataset.py ---
+
+import numpy as np
+import os
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+
+def convert_pickle_to_memmap(pickle_file, output_base):
+    """Convert existing pickle data to memory-mapped format"""
+    import pickle
+
+    # Load existing data
+    with open(pickle_file, 'rb') as f:
+        data = pickle.load(f)
+
+    # Create memory-mapped arrays
+    inputs = np.memmap(f"{output_base}_inputs.dat", dtype=np.float32,
+                       mode='w+', shape=(len(data), 19, 8, 8))
+    outputs = np.memmap(f"{output_base}_outputs.dat", dtype=np.float32,
+                        mode='w+', shape=(len(data), 4096))
+
+    # Populate arrays
+    for i, item in enumerate(data):
+        inputs[i] = item['input']
+        outputs[i] = item['output']
+
+    # Save metadata separately (only non-tensor data)
+    metadata = {
+        'move_uci': [x['move_uci'] for x in data],
+        'fen': [x['fen'] for x in data],
+        'move_number': [x['move_number'] for x in data],
+        'length': len(data)
+    }
+    np.savez(f"{output_base}_meta.npz", **metadata)
+
+    return len(data)
+
+
+class MemmapChessDataset(Dataset):
+    def __init__(self, base_path):
+        self.base_path = base_path
+        # Store metadata but don't open files yet
+        meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
+        self.length = int(meta['length'])
+        self.metadata = meta
+
+        # Don't store file handles - these will be opened per-worker
+        self._inputs = None
+        self._outputs = None
+
+    def _ensure_loaded(self):
+        """Lazy loading of memory-mapped files in each worker process"""
+        if self._inputs is None:
+            self._inputs = np.memmap(f"{self.base_path}_inputs.dat",
+                                     dtype=np.float32, mode='r',
+                                     shape=(self.length, 19, 8, 8))
+            self._outputs = np.memmap(f"{self.base_path}_outputs.dat",
+                                      dtype=np.float32, mode='r',
+                                      shape=(self.length, 4096))
+
+    def __getitem__(self, idx):
+        self._ensure_loaded()  # Open files if not already open
+        input_tensor = torch.from_numpy(self._inputs[idx].copy())
+        output_tensor = torch.from_numpy(self._outputs[idx].copy())
+        return input_tensor, output_tensor
+
+    def __len__(self):
+        return self.length
+
+
+class CachedMemmapDataset(Dataset):
+    def __init__(self, base_path, cache_size=10000):
+        super().__init__()
+        self.base_path = base_path
+        self.cache_size = cache_size
+        self.cache = {}
+        self.access_count = {}
+
+        # Don't store file handles - these will be opened per-worker
+        self._inputs = None
+        self._outputs = None
+
+        # Load metadata
+        meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
+        self.length = int(meta['length'])
+
+    def _ensure_loaded(self):
+        """Lazy loading of memory-mapped files in each worker process"""
+        if self._inputs is None:
+            self._inputs = np.memmap(f"{self.base_path}_inputs.dat",
+                                     dtype=np.float32, mode='r',
+                                     shape=(self.length, 19, 8, 8))
+            self._outputs = np.memmap(f"{self.base_path}_outputs.dat",
+                                      dtype=np.float32, mode='r',
+                                      shape=(self.length, 4096))
+
+    def __getitem__(self, idx):
+        # Check cache first
+        if idx in self.cache:
+            self.access_count[idx] = self.access_count.get(idx, 0) + 1
+            return self.cache[idx]
+
+        # Load from disk if not cached
+        if not hasattr(self, '_inputs'):
+            self._ensure_loaded()
+
+        item = (
+            torch.from_numpy(self._inputs[idx].copy()),
+            torch.from_numpy(self._outputs[idx].copy())
+        )
+
+        # Cache frequently accessed items
+        if len(self.cache) < self.cache_size:
+            self.cache[idx] = item
+            self.access_count[idx] = 1
+
+        return item
+
+
+if __name__ == "__main__":
+    convert_pickle_to_memmap("../data/all_train_data.pkl", "../data/all_train_data")
+
+# --- END OF FILE: components\data_prep\mmap_dataset.py ---
+
+
+# --- START OF FILE: components\training\early_stopping.py ---
+
+class EarlyStopping:
+    """Early stopping implementation to prevent overfitting."""
+
+    def __init__(self, patience=7, min_delta=0.001, restore_best_weights=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.best_loss = float('inf')
+        self.counter = 0
+        self.best_weights = None
+
+    def __call__(self, val_loss, model):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            if self.restore_best_weights:
+                self.best_weights = model.state_dict().copy()
+        else:
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            if self.restore_best_weights and self.best_weights:
+                model.load_state_dict(self.best_weights)
+            return True
+        return False
+# --- END OF FILE: components\training\early_stopping.py ---
+
+
+# --- START OF FILE: components\training\EMA.py ---
+
+
+"""
+EMA maintains a moving average of model parameters, which produces more stable predictions by averaging out parameter noise . Use this during evaluation and inference for better performance.
+"""
+
+class EMA:
+    def __init__(self, model, decay=0.999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+
+        # Register model parameters
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                new_average = self.decay * self.shadow[name] + (1.0 - self.decay) * param.data
+                self.shadow[name] = new_average.clone()
+
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
+
+# --- END OF FILE: components\training\EMA.py ---
+
+
+# --- START OF FILE: components\training\model_validator.py ---
+
+import torch
+import torch.nn as nn
+from typing import Dict, Tuple, Any
+
+from cnn.chess.components.config import TRAINING_CONFIG
+
+
+class ModelValidator:
+    """
+    Comprehensive model validation and verification system.
+    """
+
+    @staticmethod
+    def validate_configuration(config: Dict) -> Dict[str, Any]:
+        """Validate model configuration parameters."""
+        validation_results = {
+            'valid': True,
+            'warnings': [],
+            'errors': [],
+            'recommendations': []
+        }
+
+        # Check input channels
+        if config['input_channels'] != TRAINING_CONFIG["input_channels"]:
+            validation_results['warnings'].append(
+                f"Non-standard input channels: {config['input_channels']}. Chess typically uses {TRAINING_CONFIG["input_channels"]} channels."
+            )
+
+        # Check board size
+        if config['board_size'] != 8:
+            validation_results['errors'].append(
+                f"Invalid board size: {config['board_size']}. Chess board must be 8x8."
+            )
+            validation_results['valid'] = False
+
+        # Check conv filters progression
+        conv_filters = config['conv_filters']
+        if not all(conv_filters[i] <= conv_filters[i + 1] for i in range(len(conv_filters) - 1)):
+            validation_results['warnings'].append(
+                "Convolutional filters don't follow increasing pattern."
+            )
+
+        # Check dropout rate
+        if not 0.0 <= config['dropout_rate'] <= 0.5:
+            validation_results['warnings'].append(
+                f"Dropout rate {config['dropout_rate']} may be too high or low. Recommended: 0.1-0.5"
+            )
+
+        # Check transformer configuration
+        if config['use_transformer_blocks'] and config['num_transformer_layers'] > 4:
+            validation_results['warnings'].append(
+                "Too many transformer layers may cause overfitting."
+            )
+
+        return validation_results
+
+    @staticmethod
+    def test_forward_pass(model: nn.Module, input_shape: Tuple[int, ...], device: str = 'cpu') -> Dict[str, Any]:
+        """Test model forward pass with dummy data."""
+        test_results = {
+            'success': False,
+            'output_shape': None,
+            'error': None,
+            'memory_usage': None
+        }
+
+        try:
+            model.eval()
+            model.to(device)
+
+            # Create dummy input
+            dummy_input = torch.randn(input_shape).to(device)
+
+            # Forward pass
+            with torch.no_grad():
+                output = model(dummy_input)
+            if output is None:
+                raise Exception("Model returned None output!")
+
+            test_results['success'] = True
+            test_results['output_shape'] = tuple(output.shape)
+
+            # Memory usage (approximate)
+            test_results['device'] = device
+            if device == 'cuda':
+                test_results['memory_usage'] = torch.cuda.memory_allocated() / 1024 ** 2  # MB
+
+
+        except Exception as e:
+            test_results['error'] = str(e)
+
+        return test_results
+# --- END OF FILE: components\training\model_validator.py ---
+
+
+# --- START OF FILE: components\training\schedulers.py ---
+
+import math
+
+
+class CustomWarmupCosineScheduler:
+    def __init__(self, optimizer, warmup_epochs, total_epochs, base_lr, min_lr=0):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.base_lr = base_lr
+        self.min_lr = min_lr
+
+    def step(self, epoch):
+        if epoch < self.warmup_epochs:
+            # Linear warmup
+            lr = self.base_lr * epoch / self.warmup_epochs
+        else:
+            # Cosine annealing
+            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
+
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+# --- END OF FILE: components\training\schedulers.py ---
+
+
+# --- START OF FILE: components\utils\chess_board_utils.py ---
+
+import chess
+import numpy as np
+# Piece mapping for channels 0-11
+PIECES_MAP = {
+    (chess.PAWN, chess.WHITE): 0,
+    (chess.KNIGHT, chess.WHITE): 1,
+    (chess.BISHOP, chess.WHITE): 2,
+    (chess.ROOK, chess.WHITE): 3,
+    (chess.QUEEN, chess.WHITE): 4,
+    (chess.KING, chess.WHITE): 5,
+    (chess.PAWN, chess.BLACK): 6,
+    (chess.KNIGHT, chess.BLACK): 7,
+    (chess.BISHOP, chess.BLACK): 8,
+    (chess.ROOK, chess.BLACK): 9,
+    (chess.QUEEN, chess.BLACK): 10,
+    (chess.KING, chess.BLACK): 11,
+}
+
+
+def board_to_tensor(board: chess.Board, flipped: bool = False) -> np.ndarray:
+    """
+    Convert chess board to 19-channel tensor representation.
+
+    Channels 0-5: White pieces (Pawn, Knight, Bishop, Rook, Queen, King)
+    Channels 6-11: Black pieces (Pawn, Knight, Bishop, Rook, Queen, King)
+    Channels 12-15: Castling rights
+    Channel 16: En passant target
+    Channel 17: Move count (normalized)
+    Channel 18: Turn to move (1=white, 0=black)
+    """
+    tensor = np.zeros((19, 8, 8), dtype=np.float32)
+
+    # Fill piece channels
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece:
+            channel = PIECES_MAP[(piece.piece_type, piece.color if not flipped else not piece.color)]
+            row = 7 - (square // 8) if not flipped else  square // 8 # Convert to array indexing
+            col = square % 8
+            tensor[channel, row, col] = 1.0
+
+    # Game state channels (12-18)
+    if board.has_kingside_castling_rights(chess.WHITE if not flipped else chess.BLACK):
+        tensor[12, 7, 0] = 1.0
+    if board.has_queenside_castling_rights(chess.WHITE if not flipped else chess.BLACK):
+        tensor[13, 7, 7] = 1.0
+    if board.has_kingside_castling_rights(chess.BLACK if not flipped else chess.BLACK):
+        tensor[14, 0, 0] = 1.0
+    if board.has_queenside_castling_rights(chess.BLACK if not flipped else chess.BLACK):
+        tensor[15, 0, 7] = 1.0
+
+    # En passant target
+    if board.ep_square is not None:
+        row = 7 - (board.ep_square // 8) if not flipped else  board.ep_square // 8
+        col = board.ep_square % 8
+        tensor[16, row, col] = 1.0
+
+    # Move count (normalized by 100)
+    tensor[17, :, :] = min(board.fullmove_number / 100.0, 1.0)
+
+    # Turn to move
+    if board.turn == chess.WHITE if not flipped else chess.BLACK:
+        tensor[18, :, :] = 1.0
+
+    return tensor
+# --- END OF FILE: components\utils\chess_board_utils.py ---
+
+
+# --- START OF FILE: components\utils\module_utils.py ---
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+"""
+Spectral normalization controls the Lipschitz constant of your network, making training more stable by preventing weight matrices from amplifying gradients excessively .
+ Apply this to convolutional layers that showed gradient instability.
+"""
+def spectral_norm_conv(module, coeff=1.0):
+    # Get weight parameter
+    weight = module.weight
+
+    # Calculate spectral norm
+    weight_mat = weight.view(weight.size(0), -1)
+    with torch.no_grad():
+        u = torch.randn(weight_mat.size(0), 1, device=weight.device)
+        u.data = u.data / torch.norm(u.data, p=2)
+
+        # Power iteration to approximate largest singular value
+        for _ in range(5):
+            v = torch.matmul(weight_mat.t(), u)
+            v = v / torch.norm(v, p=2)
+            u = torch.matmul(weight_mat, v)
+            u = u / torch.norm(u, p=2)
+
+        sigma = torch.matmul(u.t(), torch.matmul(weight_mat, v))
+
+    # Apply spectral normalization
+    weight_sn = weight / (sigma / coeff)
+
+    return weight_sn
+
+"""
+Mixup creates new training samples by linearly interpolating between pairs of inputs and their labels . This encourages the model to behave linearly between training examples, reducing memorization and improving generalization.
+"""
+def mixup_data(x, y, alpha=0.2):
+    """Applies mixup augmentation to the batch"""
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(x.device)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    """Calculates the mixup loss"""
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+def centralize_gradient(x, dim=0):
+    """Gradient centralization for better training stability"""
+    mean = x.mean(dim=dim, keepdim=True)
+    return x - mean
+
+def compute_grad_variance(model):
+    grad_var_dict = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_var = torch.var(param.grad.data)
+            grad_var_dict[name] = grad_var.item()
+    return grad_var_dict
+# --- END OF FILE: components\utils\module_utils.py ---
+
+
+# --- START OF FILE: components\utils\WandbLogger.py ---
+
+import wandb
+import torch
+
+class EfficientBatchLogger:
+    def __init__(self, log_frequency=50):
+        self.log_frequency = log_frequency
+        self.batch_metrics = []
+        self.running_loss = 0.0
+        self.batch_count = 0
+
+    def log_batch_metrics(self, batch_idx, loss, accuracy, learning_rate):
+        """Accumulate batch metrics for efficient logging"""
+        self.running_loss += loss
+        self.batch_count += 1
+
+        # Log detailed metrics every N batches
+        if batch_idx % self.log_frequency == 0:
+            avg_loss = self.running_loss / self.batch_count
+
+            wandb.log({
+                "batch/loss": loss,
+                "batch/running_avg_loss": avg_loss,
+                "batch/accuracy": accuracy,
+                "batch/learning_rate": learning_rate,
+                "batch/batch_idx": batch_idx
+            }, commit=False)
+
+            # Reset accumulators
+            self.running_loss = 0.0
+            self.batch_count = 0
+
+    def log_detailed_batch_info(self, model, train_loader, batch_idx, epoch, batch_time, loss):
+        """Log detailed batch information periodically"""
+
+        # Memory usage tracking
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.memory_allocated() / 1024 ** 3  # GB
+            gpu_cached = torch.cuda.memory_reserved() / 1024 ** 3  # GB
+        else:
+            gpu_memory = gpu_cached = 0.0
+
+        # Gradient norms for monitoring training stability
+        total_norm = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** (1. / 2)
+
+        # Comprehensive logging
+        wandb.log({
+            "detailed/epoch": epoch,
+            "detailed/batch_time": batch_time,
+            "detailed/gpu_memory_gb": gpu_memory,
+            "detailed/gpu_cached_gb": gpu_cached,
+            "detailed/gradient_norm": total_norm,
+            "detailed/samples_per_second": len(train_loader.dataset) / batch_time,
+        }, commit=False)
+
+    def log_training_step(self, epoch: int, train_loss: float, val_loss: float,
+                          current_lr: float, step: int):
+        """Log training metrics to W&B."""
+        wandb.log({
+            "epoch": epoch,
+            "train/loss": train_loss,
+            "train/learning_rate": current_lr,
+            "validation/loss": val_loss,
+            "step": step
+        })
+        self.batch_metrics = []
+        self.running_loss = 0.0
+        self.batch_count = 0
+# --- END OF FILE: components\utils\WandbLogger.py ---
+
+
+# --- START OF FILE: download_chess_data.py ---
+
+#!/usr/bin/env python3
+"""
+Chess PGN Data Collection Script
+Downloads 10,000 real chess games from various public sources for LLM training.
+"""
+
+import requests
+import zipfile
+import io
+import os
+import random
+import time
+from pathlib import Path
+import chess.pgn
+from typing import List, Generator
+import urllib.request
+import gzip
+import json
+
+
+class ChessPGNDownloader:
+    def __init__(self, target_games: int = 10000):
+        self.target_games = target_games
+        self.collected_games = 0
+        self.output_file = "chess_games_10k.pgn"
+
+    def download_from_twic(self, start_issue: int = 1400, max_issues: int = 50) -> List[str]:
+        """Download PGN files from The Week in Chess (TWIC)"""
+        games = []
+        base_url = "https://theweekinchess.com/zips/twic"
+
+        print(f"Downloading from TWIC issues {start_issue} to {start_issue + max_issues}")
+
+        for issue in range(start_issue, start_issue + max_issues):
+            if self.collected_games >= self.target_games:
+                break
+
+            try:
+                url = f"{base_url}{issue}g.zip"
+                print(f"Downloading TWIC {issue}...")
+                response = requests.request('GET', url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "Accept": "*/*",
+                    "Accept-Encoding": "gzip, deflate, br"
+                })
+                if response.status_code == 200:
+                    # Extract PGN from ZIP
+                    with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
+                        for file_info in zip_file.filelist:
+                            if file_info.filename.endswith('.pgn'):
+                                pgn_content = zip_file.read(file_info).decode('utf-8', errors='ignore')
+                                games_from_file = self.extract_games_from_pgn(pgn_content)
+                                games.extend(games_from_file)
+                                self.collected_games += len(games_from_file)
+                                print(f"  Added {len(games_from_file)} games (Total: {self.collected_games})")
+
+                                if self.collected_games >= self.target_games:
+                                    break
+                else:
+                    print(f"Non HTTP 200 downloading TWIC {issue}: {response}")
+                time.sleep(1)  # Be respectful to the server
+
+            except Exception as e:
+                print(f"Error downloading TWIC {issue}: {e}")
+                continue
+
+        return games[:self.target_games]
+
+    def download_from_lichess_api(self, max_games: int = 10000) -> List[str]:
+        """Download up to max_games long games from Lichess API, 100 at a time."""
+        print(f"Downloading up to {max_games} long games from Lichess API...")
+
+        games = []
+        url = "https://lichess.org/api/games/user/chess-network"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; LichessDownloader/1.0)",
+            "Accept": "application/x-ndjson"
+        }
+        params = {
+            "max": 100,
+            "rated": "true",
+            "perfType": "rapid,blitz",  # Long games
+            "pgnInJson": "true",
+            "clocks": "true",
+            "evals": "false",
+            "opening": "false",
+            "since": None  # Will be set after each batch
+        }
+
+        total_downloaded = 0
+        last_timestamp = None
+
+        while total_downloaded < max_games:
+            if last_timestamp:
+                params["since"] = last_timestamp
+            else:
+                params.pop("since", None)
+
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            if response.status_code != 200:
+                print(f"Non HTTP 200 downloading Lichess games: {response}")
+                break
+
+            lines = response.text.strip().split('\n')
+            if not lines or lines == ['']:
+                print("No more games found.")
+                break
+
+            for line in lines:
+                if total_downloaded >= max_games:
+                    break
+                games.append(line)
+                total_downloaded += 1
+
+            # Find last game's end time for pagination
+            last_game = None
+            for line in reversed(lines):
+                try:
+                    game_data = json.loads(line)
+                    last_game = game_data
+                    break
+                except Exception:
+                    continue
+
+            if last_game and 'createdAt' in last_game:
+                last_timestamp = last_game['createdAt']
+            elif last_game and 'lastMoveAt' in last_game:
+                last_timestamp = last_game['lastMoveAt']
+            else:
+                print("Could not determine next 'since' timestamp, stopping.")
+                break
+
+            print(f"Downloaded {total_downloaded} games so far...")
+            time.sleep(1)  # Respect Lichess API rate limits
+
+        print(f"Finished downloading {len(games)} games.")
+
+        return games
+
+    def extract_games_from_pgn(self, pgn_content: str) -> List[str]:
+        """Extract individual games from a PGN file content"""
+        games = []
+        current_game = ""
+
+        for line in pgn_content.split('\n'):
+            current_game += line + '\n'
+
+            # Check if this is the end of a game
+            if line.strip() in ['1-0', '0-1', '1/2-1/2', '*']:
+                if current_game.strip():
+                    games.append(current_game.strip())
+                current_game = ""
+
+        return games
+
+    def filter_games(self, games: List[str]) -> List[str]:
+        """Filter games to ensure quality and remove duplicates"""
+        filtered_games = []
+        seen_games = set()
+
+        for game in games:
+            # Basic quality checks
+            if len(game) < 100:  # Too short
+                continue
+
+            lines = game.strip().split('\n')
+            move_lines = [line for line in lines if not line.startswith('[') and line.strip()]
+
+            if len(move_lines) == 0:  # No moves
+                continue
+
+            # Check for duplicates (simple hash)
+            game_hash = hash(game.strip())
+            if game_hash in seen_games:
+                continue
+
+            seen_games.add(game_hash)
+            filtered_games.append(game)
+
+            if len(filtered_games) >= self.target_games:
+                break
+
+        return filtered_games
+
+    def save_games(self, games: List[str], filename: str = None):
+        """Save games to a PGN file"""
+        if filename is None:
+            filename = self.output_file
+
+        with open(filename, 'w', encoding='utf-8') as f:
+            for game in games:
+                f.write(game + '\n\n')
+
+        print(f"Saved {len(games)} games to {filename}")
+
+    def download_all(self):
+        """Main method to download games from all sources"""
+        print(f"Starting download of {self.target_games} chess games...")
+
+        all_games = []
+
+        # Try downloading from TWIC (reduced number for demo)
+        # try:
+        #     print("Attempting to download from TWIC...")
+        #     twic_games = self.download_from_twic(start_issue=1400, max_issues=1)
+        #     all_games.extend(twic_games)
+        #     print(f"Downloaded {len(twic_games)} games from TWIC")
+        # except Exception as e:
+        #     print(f"TWIC download failed: {e}")
+
+        # Try downloading from Lichess API
+        try:
+            print("Attempting to download from Lichess API...")
+            lichess_games = self.download_from_lichess_api(self.target_games - len(all_games))
+            all_games.extend(lichess_games)
+            print(f"Downloaded {len(lichess_games)} games from Lichess")
+        except Exception as e:
+            print(f"Lichess download failed: {e}")
+
+        # Generate remaining games as samples
+        remaining_needed = self.target_games - len(all_games)
+        if remaining_needed > 0:
+            print(f"Generating {remaining_needed} sample games...")
+            sample_games = self.generate_sample_games(remaining_needed)
+            all_games.extend(sample_games)
+
+        # Filter and deduplicate
+        print("Filtering and deduplicating games...")
+        filtered_games = self.filter_games(all_games)
+
+        # Save to file
+        self.save_games(filtered_games)
+
+        print(f"Successfully collected {len(filtered_games)} chess games!")
+        return filtered_games
+
+
+if __name__ == "__main__":
+    downloader = ChessPGNDownloader(target_games=10000)
+    games = downloader.download_all()
+# --- END OF FILE: download_chess_data.py ---
+
+
+# --- START OF FILE: generate_data.py ---
+
+import random
+import os
+import gc
+import chess
+import chess.pgn
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from typing import List, Dict, Tuple
+
+from cnn.chess.components.utils.chess_board_utils import board_to_tensor
+
+
+class ChessTrainingDataGenerator:
+    """
+    Converts PGN chess games into training data for CNN.
+    """
+
+    def __init__(self,
+                 #min_elo: int = 2000,
+                 skip_opening_moves: int = 6,
+                 #skip_endgame_moves: int = 10
+                 ):
+        #self.min_elo = min_elo
+        self.skip_opening_moves = skip_opening_moves
+        # self.skip_endgame_moves = skip_endgame_moves
+
+
+    def move_to_index(self, move: chess.Move) -> int:
+        """Convert move to index in 4096-dimensional output vector."""
+        return move.from_square * 64 + move.to_square
+
+    def process_pgn_string(self, game) -> List[Dict]:
+        """Process PGN string and extract training positions."""
+        # pgn_io = io.StringIO(pgn_string)
+        # game = chess.pgn.read_game(pgn_io)
+
+        if not game:
+            return []
+
+        # Check ELO requirements
+        try:
+            white_elo = int(game.headers.get("WhiteElo", 0))
+            black_elo = int(game.headers.get("BlackElo", 0))
+        #     if white_elo < self.min_elo or black_elo < self.min_elo:
+        #         print(f"Skipping game: ELO too low (W:{white_elo}, B:{black_elo})")
+        #         return []
+        except (ValueError, TypeError):
+            # print("Could not parse ELO ratings")
+            white_elo = 0
+            black_elo = 0
+
+        training_data = []
+        board = game.board()
+        moves = list(game.mainline_moves())
+        is_puzzle = board.fullmove_number > 1
+        # skip_one = is_puzzle #On puzzles skip the 1st move it's the mistake
+        for move_idx, move in enumerate(moves):
+            # Skip opening and endgame moves
+            if not is_puzzle and move_idx < self.skip_opening_moves:
+                board.push(move)
+                continue
+
+
+            # Create input tensor from current position
+            for shape in ["normal", "flipped"]:
+                input_tensor = board_to_tensor(board, shape == "flipped")
+
+                # Create one-hot output vector
+                output_vector = np.zeros(4096, dtype=np.float32)
+                move_index = self.move_to_index(move)
+                output_vector[move_index] = 1.0
+
+                # Store training example
+                training_data.append({
+                    'input': input_tensor,
+                    'output': output_vector,
+                    'move_uci': move.uci(),
+                    'fen': board.fen(),
+                    'move_number': board.fullmove_number,
+                    'game_info': {
+                        'white': game.headers.get("White", "Unknown") if shape == "flipped" else game.headers.get("Black", "Unknown_flipped"),
+                        'black': game.headers.get("Black", "Unknown") if shape == "flipped" else game.headers.get("White", "Unknown_flipped"),
+                        'white_elo': white_elo if shape == "flipped" else black_elo,
+                        'black_elo': black_elo if shape == "flipped" else white_elo,
+                        'event': game.headers.get("Event", "Unknown")
+                    }
+                })
+
+            board.push(move)
+
+        return training_data
+
+
+class ChessDataset(Dataset):
+    """PyTorch Dataset for chess training data."""
+
+    def __init__(self, training_data: List[Dict]):
+        self.data = training_data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        #if sent to CUDA, DataLoader.pin_memory needs to be set to false, because it's used to optimize the migration from CPU to CUDA
+        input_tensor = torch.FloatTensor(item['input'])#.to('cuda' if TRAINING_CONFIG["device"] == "cuda" else 'cpu')
+        output_tensor = torch.FloatTensor(item['output'])#.to('cuda' if TRAINING_CONFIG["device"] == "cuda" else 'cpu')
+        return input_tensor, output_tensor
+
+
+def create_optimized_dataloaders(dataset, batch_size=512):
+    """Create CUDA-optimized data loaders"""
+
+    # Split dataset
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
+
+    # Optimized loader configuration
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=8,  # Increase based on CPU cores
+        pin_memory=True,  # Enable fast CPU->GPU transfer
+        persistent_workers=True,  # Keep workers alive between epochs
+        prefetch_factor=4  # Prefetch multiple batches
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size * 2,  # Larger batch for validation
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True
+    )
+
+    return train_loader, val_loader
+
+
+def create_chess_data_loaders(
+        training_data: List[Dict],
+        batch_size,
+        num_workers,
+        train_split: float = 0.8,
+) -> Tuple[DataLoader, DataLoader]:
+    """Create training and validation data loaders."""
+
+    # Split data
+    split_idx = int(len(training_data) * train_split)
+    train_data = training_data[:split_idx]
+    val_data = training_data[split_idx:]
+
+    print(f"Training set: {len(train_data)} examples")
+    print(f"Validation set: {len(val_data)} examples")
+
+    # Create datasets
+    train_dataset = ChessDataset(train_data)
+    val_dataset = ChessDataset(val_data)
+
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=True, # Keep workers alive between epochs
+        prefetch_factor=4       # Prefetch multiple batches
+        # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size * 2,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False,
+        persistent_workers=True, # Keep workers alive between epochs
+        # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
+    )
+
+    return train_loader, val_loader
+
+def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
+    """Load all games from the PGN file"""
+    games = []
+    with open(pgn_file, 'r', encoding='utf-8') as f:
+        while len(games) < max_games:
+            try:
+                if len(games) % 1000 == 0:
+                    print(f"Loading game {len(games)}, remains {max_games - len(games)}")
+                game = chess.pgn.read_game(f)
+                if game is None:
+                    break
+                games.append(game)
+            except Exception as e:
+                print(f"Error reading game: {e}")
+                continue
+
+    return games
+
+def aggregate_pgn_games(directory, max_games):
+    all_games = []
+    for filename in os.listdir(directory):
+        if filename.endswith('.pgn'):
+            file_path = os.path.join(directory, filename)
+            print(f"Loading games from {file_path}")
+            games = load_pgn_games(file_path, max_games - len(all_games))
+            print(f"Loaded {len(games)} games from {file_path}, remains {max_games - len(games)}")
+            all_games.extend(games)
+    random.shuffle(all_games)
+    return all_games
+
+# Example usage
+if __name__ == "__main__":
+    # Sample master game
+    mmap_filename = "data/all_train_data_with_puzzles_v2"
+    max_games = 10_000_000
+    estimated_positions_count = 16_667_704 + 10 # used to allocate space
+    fail_if_more_positions_available = True
+    print("Loading PGN games...")
+    games = []
+    games.extend(aggregate_pgn_games("data/pgn/puzzles/", max_games-len(games)))
+    games.extend(aggregate_pgn_games("data/pgn/", max_games-len(games)))
+    random.shuffle(games)
+    print("shuffled games")
+    # Process the game
+    generator = ChessTrainingDataGenerator()
+
+    inputs_mmap = np.memmap(f'{mmap_filename}_inputs.dat', dtype=np.float32, mode='w+',
+                            shape=(estimated_positions_count, 19, 8, 8))
+    outputs_mmap = np.memmap(f'{mmap_filename}_outputs.dat', dtype=np.float32, mode='w+', shape=(estimated_positions_count, 4096))
+
+    metadata = {
+        'move_uci': [],
+        'fen': [],
+        'move_number': [],
+        # Add other metadata fields as needed
+    }
+    idx = 0
+    for i, game in enumerate(games):
+        if i % 100 == 0:
+            print(f"Processing game {i + 1}/{len(games)}")
+        try:
+            training_data = generator.process_pgn_string(game)
+            for item in training_data:
+                if idx >= estimated_positions_count:
+                    if fail_if_more_positions_available:
+                        raise Exception(f"estimated {estimated_positions_count} but we actually have more examples")
+                    else:
+                        break
+                inputs_mmap[idx] = item['input']
+                outputs_mmap[idx] = item['output']
+                metadata['move_uci'].append(item['move_uci'])
+                metadata['fen'].append(item['fen'])
+                metadata['move_number'].append(item['move_number'])
+                idx += 1
+                if idx % 100_000 == 0:
+                    print(f"Flushing to mmap game {idx}")
+                    inputs_mmap.flush()
+                    outputs_mmap.flush()
+        except Exception as e:
+            print(f"Error processing game {i}: {e}")
+            continue
+
+    # Optionally, trim arrays if you overestimated num_examples
+    inputs_mmap.flush()
+    outputs_mmap.flush()
+
+    # Save metadata and actual length
+    np.savez(f'{mmap_filename}_meta.npz', **metadata, length=idx)
+    print(f"Generated {idx} training examples in {mmap_filename}")
+    del inputs_mmap
+    del outputs_mmap
+    gc.collect()
+
+
+# --- END OF FILE: generate_data.py ---
+
+
+# --- START OF FILE: old\main_train.py ---
+
+#!/usr/bin/env python3
+"""
+Chess CNN Training Script
+
+This script trains a Convolutional Neural Network to play chess by learning
+from grandmaster games. It includes comprehensive logging with Weights & Biases,
+data augmentation, and supports both fast and optimal training configurations.
+
+Usage:
+    python main_train.py --config fast --data_path ./data/sample_games.pgn
+    python main_train.py --config optimal --wandb_project my-chess-project
+"""
+
+import argparse
+import sys
+import os
+from pathlib import Path
+import time
+import torch
+
+# Add project root to Python path
+project_root = Path(__file__).parent
+sys.path.append(str(project_root))
+
+def print_parameter_info():
+    """Print detailed parameter information for user reference."""
+    print("\n" + "="*80)
+    print("CHESS CNN TRAINING PARAMETERS")
+    print("="*80)
+    
+    parameter_explanations = {
+        "learning_rate": {
+            "description": "Controls how big steps the optimizer takes during training",
+            "typical_range": "0.0001 to 0.01",
+            "recommendations": {
+                "fast_training": 0.002,
+                "optimal_training": 0.001,
+                "large_dataset": 0.0005
+            },
+            "effects": {
+                "too_high": "Training instability, divergence",
+                "too_low": "Very slow convergence, training stagnation"
+            }
+        },
+        "batch_size": {
+            "description": "Number of samples processed together in one forward pass",
+            "typical_range": "16 to 512",
+            "recommendations": {
+                "limited_memory": 32,
+                "standard": 64,
+                "fast_training": 128
+            },
+            "effects": {
+                "larger": "More stable gradients, faster training, more memory usage",
+                "smaller": "Less memory usage, more gradient noise, potentially better generalization"
+            }
+        },
+        "dropout_rate": {
+            "description": "Fraction of neurons randomly set to zero during training",
+            "typical_range": "0.0 to 0.5",
+            "recommendations": {
+                "small_dataset": 0.5,
+                "standard": 0.3,
+                "large_dataset": 0.1
+            },
+            "effects": {
+                "higher": "More regularization, reduced overfitting, slower learning",
+                "lower": "Less regularization, potential overfitting, faster learning"
+            }
+        },
+        "weight_decay": {
+            "description": "L2 regularization strength - penalizes large weights",
+            "typical_range": "1e-6 to 1e-2",
+            "recommendations": {
+                "small_dataset": 1e-3,
+                "standard": 1e-4,
+                "large_dataset": 1e-5
+            },
+            "effects": {
+                "higher": "Stronger regularization, smaller weights, reduced overfitting",
+                "lower": "Weaker regularization, potential overfitting"
+            }
+        }
+    }
+    
+    for param_name, info in parameter_explanations.items():
+        print(f"\n{param_name.upper()}:")
+        print(f"  Description: {info['description']}")
+        print(f"  Typical Range: {info['typical_range']}")
+        print("  Recommendations:")
+        for scenario, value in info['recommendations'].items():
+            print(f"    - {scenario}: {value}")
+        print("  Effects:")
+        for effect, description in info['effects'].items():
+            print(f"    - {effect}: {description}")
+    
+    print("\n" + "="*80)
+
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train a CNN to play chess",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Quick training (< 8 hours)
+  python main_train.py --config fast --data_path data/sample_games.pgn
+  
+  # Optimal training for best performance
+  python main_train.py --config optimal --download_data
+  
+  # Custom configuration
+  python main_train.py --lr 0.002 --batch_size 128 --epochs 50
+  
+  # Show parameter information
+  python main_train.py --show_params
+        """
+    )
+    
+    # Configuration options
+    parser.add_argument("--config", type=str, choices=["fast", "optimal", "debug"],
+                       help="Use predefined configuration")
+    parser.add_argument("--show_params", action="store_true",
+                       help="Show detailed parameter information and exit")
+    
+    # Data options
+    parser.add_argument("--data_path", type=str,
+                       help="Path to PGN file with chess games")
+    parser.add_argument("--download_data", action="store_true",
+                       help="Download sample chess data automatically")
+    parser.add_argument("--min_elo", type=int, default=2000,
+                       help="Minimum ELO rating for games to include")
+    parser.add_argument("--max_games", type=int,
+                       help="Maximum number of games to process")
+    
+    # Model options
+    parser.add_argument("--param_target_min", type=int, default=500000,
+                       help="Minimum number of model parameters")
+    parser.add_argument("--param_target_max", type=int, default=2000000,
+                       help="Maximum number of model parameters")
+    
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, help="Learning rate")
+    parser.add_argument("--batch_size", type=int, help="Batch size")
+    parser.add_argument("--epochs", type=int, help="Number of epochs")
+    parser.add_argument("--dropout", type=float, help="Dropout rate")
+    parser.add_argument("--weight_decay", type=float, help="Weight decay")
+    
+    # Hardware options
+    parser.add_argument("--device", type=str, choices=["auto", "cuda", "cpu", "mps"],
+                       default="auto", help="Device to use for training")
+    parser.add_argument("--mixed_precision", action="store_true",
+                       help="Use mixed precision training")
+    parser.add_argument("--num_workers", type=int, help="Number of data loading workers")
+    
+    # WandB options
+    parser.add_argument("--wandb_project", type=str, default="chess-cnn",
+                       help="WandB project name")
+    parser.add_argument("--wandb_entity", type=str, help="WandB entity name")
+    parser.add_argument("--wandb_run_name", type=str, help="WandB run name")
+    parser.add_argument("--no_wandb", action="store_true", help="Disable WandB logging")
+    
+    # Output options
+    parser.add_argument("--output_dir", type=str, default="./checkpoints",
+                       help="Directory to save model checkpoints")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    
+    return parser.parse_args()
+
+
+def main():
+    """Main training function."""
+    args = parse_arguments()
+    
+    if args.show_params:
+        print_parameter_info()
+        return
+    
+    print("="*80)
+    print("CHESS CNN TRAINING")
+    print("="*80)
+    print("For a complete implementation, please:")
+    print("1. Create the full project structure as shown in README.md")
+    print("2. Implement all the required modules (config, models, data, training)")
+    print("3. Install dependencies from requirements.txt")
+    print("4. Run this script with the appropriate configuration")
+    print("\nThis simplified version demonstrates the project structure.")
+    print("For the full implementation, refer to the generated project files.")
+    
+    # Create checkpoint directory
+    checkpoint_dir = Path(args.output_dir)
+    checkpoint_dir.mkdir(exist_ok=True)
+    print(f"Checkpoint directory: {checkpoint_dir}")
+    
+    # Basic configuration display
+    config_name = args.config or "custom"
+    print(f"\nConfiguration: {config_name}")
+    print(f"Device: {args.device}")
+    print(f"Mixed precision: {args.mixed_precision}")
+    print(f"WandB logging: {not args.no_wandb}")
+    
+    if args.data_path:
+        print(f"Data path: {args.data_path}")
+    elif args.download_data:
+        print("Will download sample data")
+    else:
+        print("No data source specified. Use --data_path or --download_data")
+        return
+    
+    print("\nTo run the complete training:")
+    print("1. Implement all project modules")
+    print("2. Use the provided architecture and configuration files")
+    print("3. Connect to WandB for monitoring")
+    print("4. Train with grandmaster chess games")
+
+
+if __name__ == "__main__":
+    main()
+# --- END OF FILE: old\main_train.py ---
+
+
+# --- START OF FILE: old\models-chess_cnn.py ---
+
+import torch                     # Main PyTorch library for tensor operations
+import torch.nn as nn            # Neural network modules (layers, loss functions)
+import torch.nn.functional as F  # Functional interface for operations like activation functions
+import torch.optim as optim
+from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau
+import math
+
+BASE_CONFIG = {
+    "input_channels" : 19, #12 pieces, 1 en passant, 4 castling, check, light/dark square bishop
+    "board_size" : 8,
+    "kernel_size" : 3,
+    "stride" : 1,
+    'activation_fn' : "gelu",
+}
+# Example model configurations for different time constraints
+"""
+The model's parameters are distributed across different layers, with the fully connected layers containing the vast majority of parameters:
+    Conv Layer 1: ~8,256 parameters (0.2% of total)
+    Conv Layer 2: ~41,568 parameters (1.0% of total)
+    FC Layer: ~2,359,680 parameters (59.2% of total)
+    Output Layer: ~1,576,960 parameters (39.6% of total)
+Total: ~3,986,464 parameters
+
+This distribution is typical for CNN architectures, where fully connected layers often contain most of the parameters.
+"""
+FAST_TRAINING_CONFIG = {
+    **BASE_CONFIG,                # Inherits all base configuration parameters
+    'conv_filters': [48, 96],     # Two convolutional layers with 48 and 96 filters
+    'fc_layers': [384],           # One fully connected layer with 384 neurons
+    'dropout_rate': 0.2,          # 20% dropout for regularization
+    'batch_norm': False,          # No batch normalization
+    'use_attention': False,
+    'use_transformer_blocks': False,
+}
+
+OPTIMAL_TRAINING_CONFIG = {
+    **BASE_CONFIG,
+    'conv_filters': [64, 128, 256], # Three convolutional layers
+    'fc_layers': [512, 256],        # Two fully connected layers
+    'dropout_rate': 0.3,            # 30% dropout
+    'batch_norm': True,             # With batch normalization
+    'use_attention': True,
+    'use_transformer_blocks': True,
+    'num_transformer_layers': 2,
+    'transformer_heads': 8,
+}
+
+CONFIG = FAST_TRAINING_CONFIG      # Sets the active configuration
+
+
+class ResidualBlock(nn.Module):
+    """
+    Residual block with skip connections for improved gradient flow.
+    Implements the identity mapping approach from ResNet architecture.
+    """
+    def __init__(self,
+                 out_channels,
+                 in_channels = CONFIG["input_channels"],
+                 kernel_size= CONFIG["kernel_size"],
+                 stride= CONFIG["stride"],
+                 activation_fn= nn.GELU if CONFIG["activation_fn"]=="gelu" else nn.ReLU,
+                 batch_norm=CONFIG["batch_norm"],
+                 dropout_rate=CONFIG["dropout_rate"],
+                 ):
+        super(ResidualBlock, self).__init__()
+
+        self.conv1 = nn.Conv2d(in_channels,
+                               out_channels,
+                               kernel_size,
+                               stride,
+                               padding=1,
+                               bias=not batch_norm)
+        self.conv2 = nn.Conv2d(out_channels,
+                               out_channels,
+                               kernel_size,
+                               1,
+                               padding=1,
+                               bias=not batch_norm)
+
+        self.batch_norm = batch_norm
+        if batch_norm:
+            self.bn1 = nn.BatchNorm2d(out_channels)
+            self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.activation = activation_fn()
+        self.dropout = nn.Dropout2d(dropout_rate)
+
+        # Skip connection adjustment for dimension matching
+        self.skip_connection = None
+        if in_channels != out_channels or stride != 1:
+            self.skip_connection = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1, stride, bias=False),
+                nn.BatchNorm2d(out_channels) if batch_norm else nn.Identity()
+            )
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        if self.batch_norm:
+            out = self.bn1(out)
+        out = self.activation(out)
+        out = self.dropout(out)
+
+        out = self.conv2(out)
+        if self.batch_norm:
+            out = self.bn2(out)
+
+        # Apply skip connection transformation if needed
+        if self.skip_connection is not None:
+            residual = self.skip_connection(x)
+
+        # Add residual connection
+        out += residual
+        out = self.activation(out)
+
+        return out
+
+class ChessCNN(nn.Module):
+    """
+    Convolutional Neural Network for chess move prediction.
+    
+    This model takes a chess board representation as input and 
+    outputs a move probability distribution.
+    
+    Parameters:
+    -----------
+    input_channels : int
+        Number of input channels (typically 12 for 6 piece types x 2 colors)
+    board_size : int
+        Size of the chess board (typically 8 for standard chess)
+    conv_filters : list
+        List of integers representing the number of filters in each convolutional layer
+    fc_layers : list
+        List of integers representing the size of each fully connected layer
+    dropout_rate : float
+        Dropout rate for regularization
+    batch_norm : bool
+        Whether to use batch normalization
+    """
+    def __init__(
+        self, 
+        input_channels=CONFIG["input_channels"],
+        out_channels=64 * 64,
+        board_size=CONFIG["board_size"],
+        conv_filters=CONFIG["conv_filters"], #[64, 128, 256],
+        fc_layers=CONFIG["fc_layers"], #[1024, 512],
+        dropout_rate=CONFIG["dropout_rate"], #0.3,
+        batch_norm=CONFIG["batch_norm"],
+        kernel_size=CONFIG["kernel_size"],
+        stride= CONFIG["stride"],
+        activation_fn= nn.GELU if CONFIG["activation_fn"]=="gelu" else nn.ReLU,
+        use_attention=CONFIG["use_attention"],
+        use_transformer_blocks=CONFIG["use_attention"],
+        num_transformer_layers=2,
+        transformer_heads=8
+    ):
+        super(ChessCNN, self).__init__()
+
+        self.input_channels = input_channels
+        self.out_channels = out_channels
+        self.board_size = board_size
+        self.conv_filters = conv_filters
+        self.fc_layers = fc_layers
+        self.dropout_rate = dropout_rate
+        self.batch_norm = batch_norm
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.activation = activation_fn()
+        self.use_attention = use_attention
+        self.use_transformer_blocks = use_transformer_blocks
+
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding2D(input_channels, board_size, board_size)
+
+        # Calculate parameter count to ensure it falls within 500K-2M range
+        self._create_layers()
+        self.param_count = self._count_parameters()
+        
+    def _create_layers(self):
+        """Create all layers of the CNN model.
+        This loop creates the convolutional layers based on the conv_filters configuration:
+            For each filter size in conv_filters, it creates a convolutional layer
+            If batch normalization is enabled, it adds a BatchNorm2d layer
+            It adds a ReLU activation function for non-linearity
+            It adds a Dropout layer for regularization
+            It updates in_channels for the next layer
+        The method then calculates the size of the flattened features and creates fully connected layers:"""
+        # Convolutional layers
+        self.conv_layers = nn.ModuleList()
+        in_channels = self.input_channels
+        # Skip connection adjustment for dimension matching
+        self.skip_connection = None
+        if in_channels != self.out_channels or self.stride != 1:
+            self.skip_connection = nn.Sequential(
+                nn.Conv2d(in_channels, self.out_channels, 1, self.stride, bias=False),
+                nn.BatchNorm2d(self.out_channels) if self.batch_norm else nn.Identity()
+            )
+
+        for i, filters in enumerate(self.conv_filters):
+            conv_layer = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=filters,
+                kernel_size=self.kernel_size,
+                padding=1
+            )
+            self.conv_layers.append(conv_layer)
+            
+            if self.batch_norm:
+                self.conv_layers.append(nn.BatchNorm2d(filters))
+            
+            self.conv_layers.append(self.activation())
+            self.conv_layers.append(nn.Dropout2d(self.dropout_rate))
+            
+            in_channels = filters
+        
+        # Calculate the size of the flattened features after convolution
+        """The method then calculates the size of the flattened features and creates fully connected layers
+        This loop creates the fully connected layers based on the fc_layers configuration:
+            For each size in fc_layers, it creates a linear layer
+            It adds a ReLU activation function
+            It adds a Dropout layer for regularization
+            It updates in_features for the next layer
+        """
+        self.flattened_size = in_channels * self.board_size * self.board_size
+        
+        # Fully connected layers
+        self.fc_layers_list = nn.ModuleList()
+        in_features = self.flattened_size
+        
+        for i, fc_size in enumerate(self.fc_layers):
+            fc_layer = nn.Linear(in_features, fc_size)
+            self.fc_layers_list.append(fc_layer)
+            self.fc_layers_list.append(nn.ReLU())
+            self.fc_layers_list.append(nn.Dropout(self.dropout_rate))
+            in_features = fc_size
+
+
+        # Output layer - for move prediction (from-square and to-square)
+        # 64 squares for from-square, 64 squares for to-square
+        """
+        Finally, it creates the output layer
+        This output layer maps to 4096 values, representing all possible moves from any square to any square on the chess board (64×64)
+        """
+        self.output_layer = nn.Linear(in_features, self.out_channels)
+        
+    def forward(self, x):
+        """
+        Forward pass through the network.
+        The forward method defines how data flows through the network
+        This method processes the input tensor through all layers sequentially:
+            It passes the input through all convolutional layers
+            It flattens the output to a 1D vector
+            It passes the flattened output through all fully connected layers
+            It passes through the output layer to produce the final output
+
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Input tensor representing a batch of chess boards
+            Shape: (batch_size, input_channels, board_size, board_size)
+            
+        Returns:
+        --------
+        torch.Tensor
+            Output tensor with move probabilities
+            Shape: (batch_size, 64*64) for standard chess
+        """
+        # Convolutional layers
+        for layer in self.conv_layers:
+            x = layer(x)
+        
+        # Flatten
+        x = x.view(x.size(0), -1)
+        
+        # Fully connected layers
+        for layer in self.fc_layers_list:
+            x = layer(x)
+
+        if self.skip_connection is not None:
+            x = self.skip_connection(x)
+
+        # Output layer
+        x = self.output_layer(x)
+        
+        return x
+    
+    def _count_parameters(self):
+        """Count the number of trainable parameters in the model."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+    
+    def get_move_probabilities(self, x):
+        """
+        Get move probabilities from model output.
+        converts the raw model output to move probabilities:
+            Gets the raw logits from the forward pass
+            Reshapes them to (batch_size, 64, 64) for from-square and to-square representation
+            Applies softmax to get a probability distribution
+            Returns the probabilities in the same shape
+
+        Parameters:
+        -----------
+        x : torch.Tensor
+            Input tensor representing a batch of chess boards
+            
+        Returns:
+        --------
+        torch.Tensor
+            Probability distribution over all possible moves
+        """
+        logits = self.forward(x)
+        # Reshape to (batch_size, 64, 64) for from-square and to-square
+        logits = logits.view(logits.size(0), 64, 64)
+        probabilities = F.softmax(logits.view(logits.size(0), -1), dim=1)
+        return probabilities.view(logits.size(0), 64, 64)
+    
+    def adjust_for_parameter_target(self, target_param_range=(500000, 2000000)):
+        """
+        Adjust model architecture to fit within target parameter range.
+        This method ensures the model has an appropriate number of parameters:
+            If the model has too few parameters, it scales up the layer sizes
+            If the model has too many parameters, it scales down the layer sizes
+            It returns the adjusted model and its parameter count
+
+        Parameters:
+        -----------
+        target_param_range : tuple
+            Target range for parameter count (min, max)
+            
+        Returns:
+        --------
+        tuple
+            (adjusted_model, param_count)
+        """
+        min_params, max_params = target_param_range
+        
+        if self.param_count < min_params:
+            # Increase model size
+            scale_factor = (min_params / self.param_count) ** 0.5
+            new_conv_filters = [max(64, int(f * scale_factor)) for f in self.conv_filters]
+            new_fc_layers = [max(128, int(f * scale_factor)) for f in self.fc_layers]
+            
+            adjusted_model = ChessCNN(
+                input_channels=self.input_channels,
+                board_size=self.board_size,
+                conv_filters=new_conv_filters,
+                fc_layers=new_fc_layers,
+                dropout_rate=self.dropout_rate,
+                batch_norm=self.batch_norm
+            )
+            
+        elif self.param_count > max_params:
+            # Decrease model size
+            scale_factor = (max_params / self.param_count) ** 0.5
+            new_conv_filters = [max(32, int(f * scale_factor)) for f in self.conv_filters]
+            new_fc_layers = [max(64, int(f * scale_factor)) for f in self.fc_layers]
+            
+            adjusted_model = ChessCNN(
+                input_channels=self.input_channels,
+                board_size=self.board_size,
+                conv_filters=new_conv_filters,
+                fc_layers=new_fc_layers,
+                dropout_rate=self.dropout_rate,
+                batch_norm=self.batch_norm
+            )
+        else:
+            # Model already in target range
+            adjusted_model = self
+            
+        return adjusted_model, adjusted_model.param_count
+
+
+def create_small_cnn_model(param_target=(500000, 2000000)):
+    """
+    Create a small CNN model with parameter count in the target range.
+    
+    Parameters:
+    -----------
+    param_target : tuple
+        Target range for parameter count (min, max)
+        
+    Returns:
+    --------
+    ChessCNN
+        Model with parameter count in target range
+    """
+    # Start with a small model
+    model = ChessCNN(
+        #input_channels=12,  # 6 piece types × 2 colors
+        #board_size=8,
+        #conv_filters=[64, 128],
+        #fc_layers=[512],
+        #dropout_rate=0.3,
+        #batch_norm=True
+    )
+    
+    # Adjust to target parameter range
+    adjusted_model, param_count = model.adjust_for_parameter_target(param_target)
+
+    print(f"Created CNN model with {param_count:,} parameters")
+    
+    return adjusted_model
+
+
+if __name__ == "__main__":
+    # Example usage and parameter counting
+    print(torch.__version__)
+    create_small_cnn_model()
+# --- END OF FILE: old\models-chess_cnn.py ---
+
+
+# --- START OF FILE: play_chess.py ---
+
+#!/usr/bin/env python3
+"""
+Chess Console Game Interface
+
+Play chess against your trained CNN model with a rich console interface.
+
+Usage:
+    python play_chess.py --model checkpoints/best_model.pth --color white --difficulty medium
+"""
+
+import argparse
+import sys
+import os
+import chess
+import chess.engine
+
+from cnn.chess.components.board.chess_engine import SimpleChessEngine
+
+
+class SimpleChessDisplay:
+    """
+    Simple console chess board display.
+    This is a simplified version for demonstration.
+    """
+    
+    def __init__(self, use_unicode=True):
+        self.use_unicode = False #use_unicode
+        
+        # Simple ASCII pieces
+        self.pieces = {
+            'K': '♔' if self.use_unicode else ' K', 'Q': '♕' if self.use_unicode else ' Q',
+            'R': '♖' if self.use_unicode else ' R', 'B': '♗' if self.use_unicode else ' B',
+            'N': '♘' if self.use_unicode else ' N', 'P': '♙' if self.use_unicode else ' P',
+            'k': '♚' if self.use_unicode else ' k', 'q': '♛' if self.use_unicode else ' q',
+            'r': '♜' if self.use_unicode else ' r', 'b': '♝' if self.use_unicode else ' b',
+            'n': '♞' if self.use_unicode else ' n', 'p': '♟' if self.use_unicode else ' p'
+        }
+    
+    def display_board(self, board):
+        """Display the chess board."""
+        print("\n" + "="*40)
+        print("   CHESS BOARD")
+        print("="*40)
+        print("    a   b   c   d   e   f   g   h")
+        print("  ┌" + "─" * 32 + "┐")
+        
+        for row in range(7, -1, -1):
+            row_str = f"{row + 1} │"
+            for col in range(8):
+                square = chess.square(col, row)
+                piece = board.piece_at(square)
+                if piece:
+                    piece_char = self.pieces[piece.symbol()]
+                else:
+                    piece_char = '  '
+                row_str += f" {piece_char} "
+            row_str += f"│ {row + 1}"
+            print(row_str)
+        
+        print("  └" + "─" * 32 + "┘")
+        print("    a   b   c   d   e   f   g   h")
+    
+    def display_info(self, board, player_color):
+        """Display game information."""
+        turn = "White" if board.turn else "Black"
+        player = "White" if player_color else "Black"
+        
+        print(f"\nTurn: {turn}")
+        print(f"You are: {player}")
+        
+        if board.is_checkmate():
+            winner = "Black" if board.turn else "White"
+            print(f"\n🏆 CHECKMATE! {winner} wins!")
+        elif board.is_stalemate():
+            print("\n🤝 STALEMATE! Draw!")
+        elif board.is_check():
+            print("\n⚠️  CHECK!")
+    
+    def get_human_move(self, board):
+        """Get move from human player."""
+        while True:
+            try:
+                legal_moves = list(board.legal_moves)
+                print(f"\nLegal moves: {len(legal_moves)}")
+                sample_moves = [board.san(move) for move in legal_moves[:8]]
+                print(f"Examples: {', '.join(sample_moves)}")
+                
+                user_input = input("\nEnter your move (e.g., 'e4', 'Nf3'): ").strip()
+                
+                if user_input.lower() == 'quit':
+                    print("Thanks for playing!")
+                    sys.exit(0)
+                
+                try:
+                    move = board.parse_san(user_input)
+                except ValueError:
+                    try:
+                        move = chess.Move.from_uci(user_input)
+                    except ValueError:
+                        print("Invalid move format. Try again.")
+                        continue
+                
+                if move in board.legal_moves:
+                    return move
+                else:
+                    print("Illegal move! Try again.")
+                    
+            except KeyboardInterrupt:
+                print("\nThanks for playing!")
+                sys.exit(0)
+
+
+class EnhancedChessDisplay(SimpleChessDisplay):
+    def display_move_analysis(self, engine, board):
+        """Display AI move analysis."""
+        if engine.model is not None:
+            print("\n" + "=" * 40)
+            print("AI MOVE ANALYSIS")
+            print("=" * 40)
+
+            analysis = engine.get_move_analysis(board)
+            if "error" not in analysis:
+                print(f"Position: {analysis['to_move']} to move")
+                print(f"Legal moves: {analysis['legal_moves_count']}")
+                print("\nTop AI predictions:")
+
+                for i, move_info in enumerate(analysis["top_moves"], 1):
+                    print(f"{i}. {move_info['move']} ({move_info['percentage']})")
+            else:
+                print(f"Analysis error: {analysis['error']}")
+
+
+
+def main():
+    """Main function."""
+    parser = argparse.ArgumentParser(description="Play chess against CNN")
+    parser.add_argument("--model", type=str, help="Path to trained model (e.g. chessMVLv1.pth)")
+    parser.add_argument("--color", choices=["white", "black"], default="white",
+                       help="Your color")
+    parser.add_argument("--difficulty", choices=["easy", "medium", "hard"], 
+                       default="medium", help="AI difficulty")
+    
+    args = parser.parse_args()
+    
+    print("="*50)
+    print("CHESS CNN CONSOLE GAME")
+    print("="*50)
+
+    model_path = args.model
+    if not model_path:
+        model_path = input("Enter the path to your model file (e.g. chessMVLv3.pth): ").strip()
+        if not model_path:
+            print("No model specified. Using models/35kGMgamesAndPuzzles.pth.")
+            model_path = "./models/35kGMgamesAndPuzzles.pth"
+
+    
+    # Initialize components
+    board = chess.Board()
+    display = EnhancedChessDisplay()
+    engine = SimpleChessEngine(model_path, version=2)
+    
+    player_color = chess.WHITE if args.color == "white" else chess.BLACK
+    
+    print(f"\nYou are playing {args.color}")
+    print(f"AI difficulty: {args.difficulty}")
+    print("Commands: Type moves like 'e4', 'Nf3', or 'quit' to exit")
+    move_count = 0
+    # Game loop
+    opening = [] #["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
+    while not board.is_game_over():
+        if move_count < len(opening):
+            move = board.parse_san(opening[move_count])
+            move_count+=1
+            board.push(move)
+            display.display_board(board)
+            display.display_info(board, player_color)
+            continue
+        os.system('cls' if os.name == 'nt' else 'clear')  # Clear screen
+        display.display_board(board)
+        display.display_info(board, player_color)
+        
+        if board.turn == player_color:
+            # Human turn
+            print("\n👤 Your turn!")
+            move = display.get_human_move(board)
+            board.push(move)
+            move_count = move_count + 1
+        else:
+            if move_count < 0:
+                print("\n👤 Play the opening for AI:")
+                move = display.get_human_move(board)
+            else:
+                # AI turn
+                print("\n🤖 AI is thinking...")
+                #time.sleep(1)  # Simulate thinking time
+                move = engine.get_model_move(board)
+            if move:
+                board.push(move)
+            else:
+                print("AI cannot move!")
+                break
+
+    # Game over
+    os.system('cls' if os.name == 'nt' else 'clear')
+    display.display_board(board)
+    display.display_info(board, player_color)
+    
+    print("\n🏁 Game Over!")
+    result = board.result()
+    if result == "1-0":
+        print("White wins!")
+    elif result == "0-1":
+        print("Black wins!")
+    else:
+        print("It's a draw!")
+
+
+if __name__ == "__main__":
+    main()
+# --- END OF FILE: play_chess.py ---
+
+
+# --- START OF FILE: train_model.py ---
+
+import time
+
+import torch.nn as nn
+import torch.optim as optim
+from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau
+import wandb
+from torchinfo import summary
+from typing import Dict
+import os
+from dotenv import load_dotenv
+import pickle
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import LinearLR
+from torch.optim.lr_scheduler import SequentialLR
+
+import multiprocessing as mp
+
+import torch
+from torch.amp import autocast, GradScaler
+
+from cnn.chess.components.training.EMA import EMA
+from cnn.chess.components.utils.WandbLogger import EfficientBatchLogger
+from cnn.chess.components.cnn.chess_cnn_v2 import EnhancedChessCNNV2
+from cnn.chess.components.config import TRAINING_CONFIG
+from cnn.chess.components.cnn.modules.focal_loss import FocalLoss
+from cnn.chess.components.data_prep.mmap_dataset import MemmapChessDataset
+from cnn.chess.components.utils.module_utils import centralize_gradient, mixup_data, mixup_criterion
+from generate_data import create_optimized_dataloaders
+from cnn.chess.components.training.model_validator import ModelValidator
+from cnn.chess.components.training.early_stopping import EarlyStopping
+
+
+class Trainer:
+    """
+    Enhanced trainer with comprehensive W&B integration, model summaries, and validation.
+    """
+
+    def __init__(
+            self,
+            model: nn.Module,
+            train_loader,
+            val_loader,
+            config: Dict,
+            project_name: str = "chess-cnn",
+            experiment_name: str = None,
+            learning_rate: float = 0.001,
+            weight_decay: float = 1e-4,
+            scheduler_type: str = 'reduce_on_plateau',
+            early_stopping_patience: int = 10
+    ):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.config = config
+        self.batch_logger = EfficientBatchLogger(log_frequency=25)
+
+        # Initialize W&B
+        load_dotenv()
+        wandb.login(key=os.getenv("WANDB_API_KEY"))
+        wandb.init(
+            project=project_name,
+            name=experiment_name,
+            config=config,
+            tags=["chess", "cnn", "enhanced", "pytorch"],
+            notes="Enhanced Chess CNN with residual connections, attention, and transformers"
+        )
+        print("✓ Wandb initialized successfully")
+
+        # Log model architecture to W&B
+        wandb.watch(self.model, log_freq=100, log="all")
+        self.scaler = GradScaler()  # Add this line for AMP
+
+        self.ema = EMA(model, decay=0.999)
+
+        # Optimizer with weight decay (L2 regularization)
+        self.optimizer = optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+            betas=(0.9, 0.999),
+            eps=1e-8
+        )
+
+        # Initialize focal loss
+        self.criterion = FocalLoss(gamma=2.0)
+
+        # Learning rate scheduler
+        if scheduler_type == 'exponential':
+            self.scheduler = ExponentialLR(self.optimizer, gamma=0.95)
+        elif scheduler_type == 'reduce_on_plateau':
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer, mode='min', factor=0.2,
+                patience=5, min_lr=1e-7
+            )
+        elif scheduler_type == 'cosine':
+            raise Exception("unstable")
+            # self.scheduler = LinearWarmupCosineAnnealingLR(
+            #     self.optimizer,
+            #     warmup_epochs=TRAINING_CONFIG["cosine"]["warmup_epochs"],
+            #     max_epochs=200,
+            #     warmup_start_lr=0.0001,
+            #     eta_min=TRAINING_CONFIG["cosine"]["eta_min"]
+            # )
+        elif scheduler_type == 'cosine_annealing':
+            warmup_scheduler = LinearLR(self.optimizer, start_factor=0.1, total_iters=TRAINING_CONFIG["cosine"]["warmup_epochs"])
+            cosine_scheduler = CosineAnnealingLR(self.optimizer, T_max=TRAINING_CONFIG["num_epoch"] - TRAINING_CONFIG["cosine"]["warmup_epochs"])
+            self.scheduler = SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], [TRAINING_CONFIG["cosine"]["warmup_epochs"]])
+        else:
+            self.scheduler = None
+
+        # Loss function with label smoothing
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+        # Early stopping
+        self.early_stopping = EarlyStopping(patience=early_stopping_patience)
+
+        # Metrics tracking
+        self.train_losses = []
+        self.val_losses = []
+        self.learning_rates = []
+
+    def print_model_summary(self):
+        """Print comprehensive model summary and log to W&B."""
+        print("=" * 80)
+        print("ENHANCED CHESS CNN MODEL SUMMARY")
+        print("=" * 80)
+
+        # Configuration summary
+        print("\n📋 MODEL CONFIGURATION:")
+        print("-" * 40)
+        for key, value in self.config.items():
+            print(f"{key:25s}: {value}")
+
+        # Parameter count
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+        print(f"\n📊 PARAMETER STATISTICS:")
+        print("-" * 40)
+        print(f"{'Total Parameters':<25s}: {total_params:,}")
+        print(f"{'Trainable Parameters':<25s}: {trainable_params:,}")
+        print(f"{'Non-trainable Parameters':<25s}: {total_params - trainable_params:,}")
+
+        # Model architecture using torchinfo
+        print(f"\n🏗️  DETAILED ARCHITECTURE:")
+        print("-" * 40)
+        try:
+            model_summary = summary(
+                self.model,
+                input_size=(1, self.config['input_channels'],
+                            self.config['board_size'], self.config['board_size']),
+                verbose=1,
+                col_names=["output_size", "num_params", "mult_adds"],
+                row_settings=["depth"]
+            )
+
+            # Log summary to W&B
+            wandb.log({
+                "model/total_params": total_params,
+                "model/trainable_params": trainable_params,
+                "model/model_size_mb": total_params * 4 / (1024 ** 2)  # Assuming float32
+            })
+
+        except Exception as e:
+            print(f"Could not generate detailed summary: {e}")
+
+        print("=" * 80)
+
+    def validate_model_setup(self):
+        """Comprehensive model validation and configuration checking."""
+        print("\n🔍 MODEL VALIDATION AND VERIFICATION")
+        print("=" * 80)
+
+        # Validate configuration
+        validator = ModelValidator()
+        validation_results = validator.validate_configuration(self.config)
+
+        print("📋 Configuration Validation:")
+        print("-" * 40)
+        if validation_results['valid']:
+            print("✅ Configuration is valid")
+        else:
+            print("❌ Configuration has errors:")
+            for error in validation_results['errors']:
+                print(f"   • {error}")
+
+        if validation_results['warnings']:
+            print("⚠️  Warnings:")
+            for warning in validation_results['warnings']:
+                print(f"   • {warning}")
+
+        if validation_results['recommendations']:
+            print("💡 Recommendations:")
+            for rec in validation_results['recommendations']:
+                print(f"   • {rec}")
+
+        # Test forward pass
+        print("\n🚀 Forward Pass Test:")
+        print("-" * 40)
+        device = next(self.model.parameters()).device
+        input_shape = (2, self.config['input_channels'],
+                       self.config['board_size'], self.config['board_size'])
+
+        test_results = validator.test_forward_pass(self.model, input_shape, str(device))
+
+        if test_results['success']:
+            print("✅ Forward pass successful")
+            print(f"   • Input shape: {input_shape}")
+            print(f"   • Output shape: {test_results['output_shape']}")
+            if test_results['memory_usage']:
+                print(f"   • Memory usage: {test_results['memory_usage']:.2f} MB")
+        else:
+            print("❌ Forward pass failed:")
+            print(f"   • Error: {test_results['error']}")
+
+        # Log validation results to W&B
+        wandb.log({
+            "validation/config_valid": validation_results['valid'],
+            "validation/num_warnings": len(validation_results['warnings']),
+            "validation/num_errors": len(validation_results['errors']),
+            "validation/forward_pass_success": test_results['success'],
+        })
+
+        print("=" * 80)
+
+    def train_epoch(self, epoch):
+        # Get model device dynamically
+        device = next(self.model.parameters()).device
+
+        if not str(device).__contains__(TRAINING_CONFIG["device"]):
+            raise Exception(f"next(self.model.parameters()).device should be {TRAINING_CONFIG["device"]} but is {device}")
+        start = time.time()
+        print(f"[{start}] start training epoch : {epoch} on {device}")
+        """Train for one epoch with gradient clipping and W&B logging."""
+        if TRAINING_CONFIG["device"] == "cuda" and not str(device).__contains__("cuda"):
+            self.model = self.model.to('cuda')  # Redundant but safe
+        self.model.train()
+        # print(f"self.model.train() done on epoch : {epoch} on {device} in {time.time() - start} seconds")
+        total_loss = 0.0
+        num_batches = 0
+        # Get a single batch from the train_loader
+        # d, t = next(iter(train_loader))
+
+        # Check device for input and target
+        # print(f"epoch {epoch}: Data {len(d)} device: {d.device}")
+        # print(f"epoch {epoch}: Target {len(t)} device: {t.device}")
+        total_data = 0
+        for batch_idx, (data, target) in enumerate(self.train_loader):
+            # print(f"start batch {batch_idx} of size {len(data)} for epoch : {epoch} on {device}")
+            batch_start_time = time.time()
+            total_data += len(data)
+            if TRAINING_CONFIG["device"] == "cuda":
+                # print(f"Data might already be on CUDA: {data.device}")
+                # print(f"Target might already be on CUDA: {target.device}")
+                # Data should be already on CUDA from DataLoader
+                data = data.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                # print(f"Data should be on CUDA: {data.device}")
+                # print(f"Target should be on CUDA: {target.device}")
+            if not str(data.device).__contains__(TRAINING_CONFIG["device"]):
+                print(f"Data device not {TRAINING_CONFIG["device"]}: {data.device}")  # Should be cuda:0
+            if not str(target.device).__contains__(TRAINING_CONFIG["device"]):
+                print(f"Target device not {TRAINING_CONFIG["device"]}: {target.device}")  # Should be cuda:0
+            if not str(next(model.parameters()).device).__contains__(TRAINING_CONFIG["device"]):
+                print(f"Model device not {TRAINING_CONFIG["device"]}: {next(model.parameters()).device}")  # Should be cuda:0
+
+            with torch.cuda.stream(torch.cuda.Stream()):
+                # Apply mixup augmentation
+                mixed_data, targets_a, targets_b, lam = mixup_data(data, target, alpha=0.2)
+
+                if TRAINING_CONFIG["mixed_precision"]:
+                    # --- AMP block starts here ---
+                    with autocast(dtype=torch.float16, device_type="cuda"):
+                        # output = self.model(data)
+                        output = model(mixed_data)
+                        # loss = self.criterion(output, target)
+                        loss = mixup_criterion(self.criterion, output, targets_a, targets_b, lam)
+                        # Backward pass with gradient scaling
+                    self.optimizer.zero_grad()
+                    self.scaler.scale(loss).backward()
+
+                    # Unscale gradients before clipping (recommended)
+                    self.scaler.unscale_(self.optimizer)
+                    # Apply gradient centralization
+                    #Gradient centralization improves training stability by removing the mean from gradients . This reduces internal covariate shift and helps with faster convergence.
+                    for param in model.parameters():
+                        if param.grad is not None:
+                            param.grad.data = centralize_gradient(param.grad.data)
+
+                    # Aggressive gradient clipping
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=TRAINING_CONFIG["gradient_clipping"]) #Reduced from 1.0
+
+                    # Optimizer step with scaler
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    # Update EMA parameters
+                    self.ema.update()
+                else:
+                    # Forward pass
+                    output = self.model(data)
+                    loss = self.criterion(output, target)
+
+                    self.optimizer.zero_grad()
+                    # Backward pass with gradient clipping
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=TRAINING_CONFIG["gradient_clipping"]) #Reduced from 1.0
+
+                    # Scheduler step (if not ReduceLROnPlateau)
+                    # if self.scheduler and not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    #     self.scheduler.step()
+                    # else:
+                    self.optimizer.step()
+
+                    #Gradient centralization improves training stability by removing the mean from gradients . This reduces internal covariate shift and helps with faster convergence.
+                    for param in model.parameters():
+                        if param.grad is not None:
+                            param.grad.data = centralize_gradient(param.grad.data)
+
+                total_loss += loss.item()
+                num_batches += 1
+
+                batch_time = time.time() - batch_start_time
+                current_lr = self.optimizer.param_groups[0]['lr']
+
+                # if batch_idx % 10 == 1:  # Calculate accuracy every 10 batches
+                #     with torch.no_grad():
+                #         pred = output.argmax(dim=1, keepdim=True)
+                #         print(f"pred shape: {pred.shape}, target shape: {target.shape}")
+                #         pred = output.argmax(dim=1)  # [batch_size, H, W]
+                #         correct = pred.eq(target).sum().item()
+                #         # correct = pred.eq(target.view_as(pred)).sum().item()
+                #         accuracy = 100. * correct / len(data)
+                # else:
+                accuracy = None
+
+                self.optimizer.zero_grad(set_to_none=True)
+                    # Log batch metrics efficiently
+                self.batch_logger.log_batch_metrics(
+                    batch_idx,
+                    loss.item(),
+                    accuracy if accuracy else 0.0,
+                    current_lr
+                )
+
+                # Additional detailed logging for specific batches
+                if True or batch_idx % 10 == 1:
+                    self.batch_logger.log_detailed_batch_info(self.model, self.train_loader, batch_idx, epoch, batch_time, loss.item())
+                # Log batch-level metrics occasionally
+                # if batch_idx % 25 == 0 or batch_idx == 0:
+                #     wandb.log({
+                #         "train/batch_loss": loss.item(),
+                #         "train/batch_idx": batch_idx
+                #     })
+            stop = time.time()
+            print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start:.2f} seconds ({total_data / num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
+        return total_loss / num_batches
+
+    def validate(self):
+        """Validate the model."""
+        self.model.eval()
+        self.ema.apply_shadow()
+        device = next(self.model.parameters()).device
+        if not str(device).__contains__(TRAINING_CONFIG["device"]):
+            raise Exception(f"next(self.model.parameters()).device is {device} but should be {TRAINING_CONFIG['device']}")
+        total_loss = 0.0
+        num_batches = 0
+
+        with torch.no_grad():
+            for data, target in self.val_loader:
+                data = data.to(device)
+                target = target.to(device)
+                output = self.model(data)
+                loss = self.criterion(output, target)
+                total_loss += loss.item()
+                num_batches += 1
+
+        # Restore original parameters for next training epoch
+        self.ema.restore()
+        return total_loss / num_batches
+
+    def train(self, num_epochs: int):
+        """Complete training loop with W&B integration and comprehensive logging."""
+        print("\n🚀 STARTING ENHANCED TRAINING")
+        print("=" * 80)
+        print(f"Training Configuration:")
+        print(f"• Epochs: {num_epochs}")
+        print(f"• Optimizer: {type(self.optimizer).__name__}")
+        print(f"• Learning Rate: {self.optimizer.param_groups[0]['lr']}")
+        print(f"• Weight Decay: {self.optimizer.param_groups[0]['weight_decay']}")
+        print(f"• Scheduler: {type(self.scheduler).__name__ if self.scheduler else 'None'}")
+        print(f"• Early Stopping Patience: {self.early_stopping.patience}")
+        print("=" * 80)
+
+        global_step = 0
+
+        for epoch in range(num_epochs):
+            # Training
+            start = time.time()
+            train_loss = self.train_epoch(epoch)
+
+            # Validation
+            val_loss = self.validate()
+
+            # Record metrics
+            self.train_losses.append(train_loss)
+            self.val_losses.append(val_loss)
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.learning_rates.append(current_lr)
+
+            # Log to W&B
+            self.batch_logger.log_training_step(epoch, train_loss, val_loss, current_lr, global_step)
+
+            # Learning rate scheduling
+            if self.scheduler:
+                if isinstance(self.scheduler, ReduceLROnPlateau):
+                    self.scheduler.step(val_loss)
+                else:
+                    self.scheduler.step()
+
+            # Early stopping check
+            if self.early_stopping(val_loss, self.model):
+                print(f"\n🛑 Early stopping triggered at epoch {epoch}")
+                wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1}, commit=True)
+                break
+
+            # Progress reporting
+            if True or (epoch + 1) % 10 == 0 or epoch == 0:
+                print(f"📊 Epoch {epoch:3d}/{num_epochs}")
+                print(f"   • Train Loss: {train_loss:.6f}")
+                print(f"   • Val Loss:   {val_loss:.6f}")
+                print(f"   • LR:         {current_lr:.2e}")
+                print(f"   • Duration:   {time.time() - start:.2f} seconds")
+                print("-" * 40)
+
+            global_step += 1
+
+        # Final model save to W&B
+        torch.save(self.model.state_dict(), "data/enhanced_chess_cnn_final.pth")
+        wandb.save("enhanced_chess_cnn_final.pth")
+
+        # Log final metrics
+        wandb.log({
+            "training/final_train_loss": self.train_losses[-1],
+            "training/final_val_loss": self.val_losses[-1],
+            "training/total_epochs": len(self.train_losses)
+        })
+
+        print(f"\n✅ Training completed!")
+        print(f"Final train loss: {self.train_losses[-1]:.6f}")
+        print(f"Final validation loss: {self.val_losses[-1]:.6f}")
+
+        return {
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses,
+            'learning_rates': self.learning_rates
+        }
+
+# Load processed training data
+def load_chess_training_data(filename):
+    with open(filename, 'rb') as f:
+        training_data = pickle.load(f)
+    return training_data
+
+def create_enhanced_chess_model_with_validation(config=None):
+    """
+    Factory function to create enhanced chess model with comprehensive validation.
+    """
+    if config is None:
+        config = TRAINING_CONFIG["config"]
+
+    print("🏗️  CREATING ENHANCED CHESS CNN MODEL")
+    print("=" * 80)
+
+    # Create model
+    if TRAINING_CONFIG["device"] == "cuda" and not torch.cuda.is_available():
+        raise Exception("CUDA required in TRAINING_CONFIG but not available")
+    model = EnhancedChessCNNV2(**config).to('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else "cpu")
+
+    print(f"EnhancedChessCNN is using device {next(model.parameters()).device}")
+    if TRAINING_CONFIG["device"] == "cuda":
+        if not all(param.device.type == 'cuda' for param in model.parameters()):
+            raise Exception(f"CUDA device not configured in a parameter but CUDA Expected.")
+        if not all(buffer.device.type == 'cuda' for buffer in model.buffers()):
+            raise Exception(f"CUDA device not configured in a buffer but CUDA Expected.")
+        print(f"EnhancedChessCNN Parameters and buffers validated with CUDA")
+
+    # Validate configuration
+    validator = ModelValidator()
+    validation_results = validator.validate_configuration(config)
+
+    if not validation_results['valid']:
+        raise ValueError(f"Invalid configuration: {validation_results['errors']}")
+
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print(f"✅ Enhanced Chess CNN created successfully!")
+    print(f"📊 Total Parameters: {total_params:,}")
+    print(f"💾 Estimated Model Size: {total_params * 4 / (1024 ** 2):.2f} MB")
+
+    if validation_results['warnings']:
+        print(f"⚠️  {len(validation_results['warnings'])} warnings found")
+
+    print("=" * 80)
+
+    return model, config
+
+
+# Example usage with comprehensive setup
+if __name__ == "__main__":
+    # Set spawn method explicitly (Windows default, but be explicit)
+    mp.set_start_method('spawn', force=True)
+    # mmap_file = 'data/mvl_train_data' #MVL games only, for shorter epochs
+    train_type = "all_train_data_with_puzzles"
+    mmap_file = f'data/{train_type}'
+
+    print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
+    print("=" * 80)
+
+    # Create enhanced model with validation
+    model, config = create_enhanced_chess_model_with_validation()
+
+    # Example training setup (requires actual data loaders)
+    # training_data = load_chess_training_data(pkl_file)
+
+    dataset = MemmapChessDataset(mmap_file)
+    print(f"Loaded training data from {mmap_file}")
+    train_loader, val_loader = create_optimized_dataloaders(dataset, batch_size=TRAINING_CONFIG["batch_size"])
+
+    # train_loader, val_loader = create_chess_data_loaders(
+    #     training_data,
+    #     train_split=0.8,
+    #     batch_size= TRAINING_CONFIG["batch_size"],  # To be adjusted
+    #     num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
+    # )
+
+    print(f"Reviewing device of data loaders from {mmap_file}")
+    d, t = next(iter(val_loader))
+    print(f"pre-training val_loader: Data {len(d)} device: {d.device}")
+    print(f"pre-training val_loader: Target {len(t)} device: {t.device}")
+    d, t = next(iter(train_loader))
+    print(f"pre-training train_loader: Data {len(d)} device: {d.device}")
+    print(f"pre-training train_loader: Target {len(t)} device: {t.device}")
+
+
+    # Initialize trainer with W&B integration
+    trainer = Trainer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        config=config,
+        project_name=f"chess-cnn",
+        experiment_name=f"run-{train_type}-{TRAINING_CONFIG["version"]}",
+        learning_rate=TRAINING_CONFIG["learning_rate"],
+        weight_decay=TRAINING_CONFIG["weight_decay"],
+        scheduler_type=TRAINING_CONFIG["scheduler_type"],
+        early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
+    )
+    print(f"Model should be on CUDA: {next(model.parameters()).device}")
+
+
+    # Print comprehensive model summary
+    trainer.print_model_summary()
+
+    # Validate model setup
+    trainer.validate_model_setup()
+
+    if train_loader is not None and val_loader is not None:
+        # Train the model
+        training_history = trainer.train(num_epochs=TRAINING_CONFIG["num_epoch"])
+        # Close W&B run
+        wandb.finish()
+    else:
+        print("⚠️  Training data loaders not provided. Model created but not trained.")
+        print("   To train, provide train_loader and val_loader parameters.")
+
+    print("\n✅ Enhanced Chess CNN setup completed!")
+
+# --- END OF FILE: train_model.py ---
