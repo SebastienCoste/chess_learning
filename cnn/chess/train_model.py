@@ -31,6 +31,7 @@ import pickle
 import multiprocessing as mp
 
 import torch
+from torch.utils.data import Dataset
 # torch._dynamo.config.capture_scalar_outputs = True
 import signal
 import atexit
@@ -124,12 +125,12 @@ def optimize_system_settings():
     print("✓ System optimizations applied")
 
 
-def create_trainer(m, d = None):
+def create_trainer(m, trains, validate, data: list[Dataset]):
     return Trainer(
         model=m,
-        dataset=d,
-        train_loader=train_loader,
-        val_loader=val_loader,
+        dataset=data,
+        train_loaders=trains,
+        val_loader=validate,
         project_name=f"chess-cnn",
         experiment_name=f"run-{TRAINING_CONFIG["pth_file"]}-{TRAINING_CONFIG["version"]}",
         learning_rate=TRAINING_CONFIG["learning_rate"],
@@ -144,36 +145,40 @@ if __name__ == "__main__":
 
     # Apply system optimizations
     optimize_system_settings()
-    train_type = "all_train_data_with_puzzles_v2"
+    train_type = "all_train_data_with_puzzles_v3"
     mmap_file = f'data/{train_type}'
+    split = 5
 
     print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
     print("=" * 80)
 
     # Create enhanced model with validation
     uncompiled_model, model, config = create_enhanced_chess_model_with_validation()
-
-    is_windows = platform.system() == 'Windows'
-    if is_windows:
-        mp.set_start_method('spawn', force=True)
-        dataset = MemmapChessDatasetWindows(mmap_file)
-    else:
-        dataset = MemmapChessDataset(mmap_file)
+    datasets = []
+    for sub in range(split):
+        is_windows = platform.system() == 'Windows'
+        if is_windows:
+            mp.set_start_method('spawn', force=True)
+            datasets.append(MemmapChessDatasetWindows(f'data/{train_type}_{sub}'))
+        else:
+            datasets.append(MemmapChessDataset(f'data/{train_type}_{sub}'))
 
     print(f"Loaded training data from {mmap_file} on {platform.system()}")
-    train_loader, val_loader, cached_dataset = create_optimized_dataloaders(dataset, base_path=mmap_file, batch_size=TRAINING_CONFIG["batch_size"], cache_type=TRAINING_CONFIG["cache_type"])
+    cached_datasets: list[Dataset]
+    train_loaders, val_loader, cached_datasets = create_optimized_dataloaders(datasets, base_path=mmap_file, batch_size=TRAINING_CONFIG["batch_size"], cache_type=TRAINING_CONFIG["cache_type"])
 
+    print(f"train_loaders has {len(train_loaders)} datasets")
     # Initialize trainer with W&B integration
-    trainer = create_trainer(model, cached_dataset)
+    trainer = create_trainer(model, train_loaders, val_loader, cached_datasets)
     print(f"Model should be on CUDA: {next(model.parameters()).device}")
 
     # Print comprehensive model summary
-    create_trainer(uncompiled_model).print_model_summary()
+    create_trainer(uncompiled_model, train_loaders, val_loader, cached_datasets).print_model_summary()
 
     # Validate model setup
     trainer.validate_model_setup()
 
-    if train_loader is not None and val_loader is not None:
+    if train_loaders is not None and val_loader is not None:
         # Train the model
         training_history = trainer.train(num_epochs=TRAINING_CONFIG["num_epoch"])
         # Close W&B run

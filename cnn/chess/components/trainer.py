@@ -4,6 +4,7 @@ import warnings
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import Dataset
 from pl_bolts.utils.stability import UnderReviewWarning
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -42,8 +43,8 @@ class Trainer:
     def __init__(
             self,
             model: nn.Module,
-            dataset,
-            train_loader,
+            dataset: list[Dataset],
+            train_loaders,
             val_loader,
             project_name: str = "chess-cnn",
             experiment_name: str = None,
@@ -56,9 +57,9 @@ class Trainer:
         self.device = next(self.model.parameters()).device
         if not str(self.device).__contains__(TRAINING_CONFIG["device"]):
             raise Exception(f"next(self.model.parameters()).device should be {TRAINING_CONFIG["device"]} but is {self.device}")
-        print("✓ Training on CUDA")
+        print(f"✓ Training on CUDA with {len(train_loaders)} training datasets")
 
-        self.train_loader = train_loader
+        self.train_loaders = train_loaders
         self.dataset = dataset
         self.val_loader = val_loader
         self.batch_logger = EfficientBatchLogger(log_frequency=25)
@@ -195,7 +196,8 @@ class Trainer:
     def train_epoch(self, epoch):
         # Get model device dynamically
         start_time = time.time()
-        print(f"[{start_time:0f}] start training epoch : {epoch}")
+        cycle = epoch % len(self.train_loaders)
+        print(f"[{start_time:0f}] start training epoch : {epoch}, cycle {cycle}")
         self.model = self.model.cuda()  # Redundant but safe
         self.model.train()
         total_loss = 0.0
@@ -203,8 +205,9 @@ class Trainer:
         total_data = 0
         num_updates = 0
         self.optimizer.zero_grad(set_to_none=True)
-
-        for batch_idx, (data, target) in enumerate(self.train_loader):
+        trainer = self.train_loaders[cycle]
+        for batch_idx, (data, target) in enumerate(trainer):
+            num_batches += 1
             # CRITICAL: Mark beginning of each iteration,
             # otherwise: RuntimeError: Error: accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run.
             # on: self.scaler.scale(loss).backward()
@@ -254,10 +257,10 @@ class Trainer:
             total_loss += loss.item() * self.accumulation_steps
             # Minimal logging (every 100 batches)
             batch_time = time.time() - batch_start_time
-            if batch_idx % 25 == 0:
+            if batch_idx % 100 == 0:
                 throughput = (batch_idx + 1) * TRAINING_CONFIG["batch_size"] / (time.time() - start_time)
-                if hasattr(self.dataset, 'get_cache_stats'):
-                    stats = self.dataset.get_cache_stats()
+                if hasattr(self.dataset[cycle + 1], 'get_cache_stats'):
+                    stats = self.dataset[cycle + 1].get_cache_stats()
                     print(
                         f"Batch {batch_idx:5d} | Loss: {loss.item():.4f} | "
                         f"Throughput: {throughput:.2f} samples/sec | "
@@ -279,12 +282,12 @@ class Trainer:
                     "train/batch_idx": batch_idx,
                     "train/epoch_throughput": throughput,
                 })
-                self.batch_logger.log_detailed_batch_info(self.model, self.train_loader, batch_idx, epoch, batch_time, loss.item())
+                self.batch_logger.log_detailed_batch_info(self.model, trainer, batch_idx, epoch, batch_time, loss.item())
 
         stop = time.time()
-        if num_batches > 0:
+        if num_batches >0:
             print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start_time:.2f} seconds ({total_data / num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
-        return total_loss / num_batches
+        return total_loss / num_batches if num_batches > 0 else 0
 
     def validate(self):
         """Validate the model."""
@@ -333,59 +336,60 @@ class Trainer:
             train_loss = self.train_epoch(epoch)
 
             # Validation
-            val_loss = self.validate()
+            if epoch % len(self.train_loaders) == 0 and epoch != 0:
+                val_loss = self.validate()
 
-            # Record metrics
-            self.train_losses.append(train_loss)
-            self.val_losses.append(val_loss)
-            current_lr = self.optimizer.param_groups[0]['lr']
-            self.learning_rates.append(current_lr)
+                # Record metrics
+                self.train_losses.append(train_loss)
+                self.val_losses.append(val_loss)
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.learning_rates.append(current_lr)
 
-            # Log to W&B
-            self.batch_logger.log_training_step(epoch, train_loss, val_loss, current_lr, global_step)
+                # Log to W&B
+                self.batch_logger.log_training_step(epoch, train_loss, val_loss, current_lr, global_step)
 
-            # Learning rate scheduling
-            if self.scheduler:
-                if isinstance(self.scheduler, ReduceLROnPlateau):
-                    self.scheduler.step(val_loss)
-                else:
-                    self.scheduler.step()
+                # Learning rate scheduling
+                if self.scheduler:
+                    if isinstance(self.scheduler, ReduceLROnPlateau):
+                        self.scheduler.step(val_loss)
+                    else:
+                        self.scheduler.step()
 
-            # Checkpoint saving logic
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                # Save model checkpoint
-                checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}.pth"
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                }, checkpoint_path)
+                # Checkpoint saving logic
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    # Save model checkpoint
+                    checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}.pth"
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                        'train_loss': train_loss,
+                        'val_loss': val_loss,
+                    }, checkpoint_path)
 
-                print(f"\n💾 Saved new best model at epoch {epoch} with val loss {val_loss:.6f}")
-                wandb.save(checkpoint_path)
+                    print(f"\n💾 Saved new best model at epoch {epoch} with val loss {val_loss:.6f}")
+                    wandb.save(checkpoint_path)
 
-                # Optional: Also log to W&B
-                wandb.log({"best_val_loss": val_loss, "best_epoch": epoch})
+                    # Optional: Also log to W&B
+                    wandb.log({"best_val_loss": val_loss, "best_epoch": epoch})
 
-            # Early stopping check
-            if self.early_stopping(val_loss, self.model):
-                print(f"\n🛑 Early stopping triggered at epoch {epoch}")
-                wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1}, commit=True)
-                break
+                # Early stopping check
+                if self.early_stopping(val_loss, self.model):
+                    print(f"\n🛑 Early stopping triggered at epoch {epoch}")
+                    wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1}, commit=True)
+                    break
 
 
-            print(f"📊 Epoch {epoch:3d}/{num_epochs}")
-            print(f"   • Train Loss: {train_loss:.6f}")
-            print(f"   • Val Loss:   {val_loss:.6f}")
-            print(f"   • LR:         {current_lr:.2e}")
-            print(f"   • Duration:   {time.time() - start:.2f} seconds")
-            print("-" * 40)
+                print(f"📊 Epoch {epoch:3d}/{num_epochs}")
+                print(f"   • Train Loss: {train_loss:.6f}")
+                print(f"   • Val Loss:   {val_loss:.6f}")
+                print(f"   • LR:         {current_lr:.2e}")
+                print(f"   • Duration:   {time.time() - start:.2f} seconds")
+                print("-" * 40)
 
-            global_step += 1
+                global_step += 1
 
         # Final model save to W&B
         torch.save(self.model.state_dict(), f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_final.pth")
