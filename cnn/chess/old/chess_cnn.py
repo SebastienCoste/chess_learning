@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch
 
 from cnn.chess.components.config import TRAINING_CONFIG
-from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.mish_activation import MishActivation
 from cnn.chess.components.cnn.modules.residual_block import ResidualBlock
 from cnn.chess.components.cnn.modules.spatial_attention import SpatialChannelAttention
 from cnn.chess.components.cnn.modules.chess_transformer_block import ChessTransformerBlock
@@ -15,7 +15,7 @@ def get_activation_function(activation_name='gelu'):
     activations = {
         'relu': nn.ReLU,
         'gelu': nn.GELU,
-        'mish': MishActivation,
+        'mish': F.mish,
         'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
     }
     return activations.get(activation_name.lower(), nn.GELU)

@@ -2,30 +2,36 @@ import time
 
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau
+
+import numpy as np
+import warnings
+
+from pl_bolts.utils.stability import UnderReviewWarning
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UnderReviewWarning)
+if not hasattr(np, 'bool'):
+    np.bool = np.bool_
+from pl_bolts.optimizers import LinearWarmupCosineAnnealingLR
+from torch.optim.lr_scheduler import ExponentialLR, ReduceLROnPlateau, CosineAnnealingWarmRestarts
 import wandb
 from torchinfo import summary
 from typing import Dict
 import os
 from dotenv import load_dotenv
-import pickle
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.lr_scheduler import LinearLR
 from torch.optim.lr_scheduler import SequentialLR
 
-import multiprocessing as mp
-
 import torch
 from torch.amp import autocast, GradScaler
 
+from cnn.chess.components.cnn.data_manip.gradient_noise_optimizer import GradientNoiseOptimizer
 from cnn.chess.components.training.EMA import EMA
 from cnn.chess.components.utils.WandbLogger import EfficientBatchLogger
-from cnn.chess.components.cnn.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.cnn.modules.focal_loss import FocalLoss
-from cnn.chess.components.data_prep.mmap_dataset import MemmapChessDataset
 from cnn.chess.components.utils.module_utils import centralize_gradient, mixup_data, mixup_criterion
-from generate_data import create_optimized_dataloaders
 from cnn.chess.components.training.model_validator import ModelValidator
 from cnn.chess.components.training.early_stopping import EarlyStopping
 
@@ -73,16 +79,18 @@ class Trainer:
         self.ema = EMA(model, decay=0.999)
 
         # Optimizer with weight decay (L2 regularization)
-        self.optimizer = optim.AdamW(
+        optimizer = optim.AdamW(
             model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
             betas=(0.9, 0.999),
             eps=1e-8
         )
+        # Wrap optimizer with gradient noise
+        self.optimizer = GradientNoiseOptimizer(optimizer, noise_std=0.01, decay=0.55)
 
         # Initialize focal loss
-        self.criterion = FocalLoss(gamma=2.0)
+        self.criterion = FocalLoss(alpha=0.25, gamma=2.0)
 
         # Learning rate scheduler
         if scheduler_type == 'exponential':
@@ -93,23 +101,40 @@ class Trainer:
                 patience=5, min_lr=1e-7
             )
         elif scheduler_type == 'cosine':
-            raise Exception("unstable")
-            # self.scheduler = LinearWarmupCosineAnnealingLR(
-            #     self.optimizer,
-            #     warmup_epochs=TRAINING_CONFIG["cosine"]["warmup_epochs"],
-            #     max_epochs=200,
-            #     warmup_start_lr=0.0001,
-            #     eta_min=TRAINING_CONFIG["cosine"]["eta_min"]
-            # )
+            # raise Exception("unstable")
+            self.scheduler = LinearWarmupCosineAnnealingLR(
+                self.optimizer,
+                warmup_epochs=TRAINING_CONFIG["cosine"]["warmup_epochs"],
+                max_epochs=200,
+                warmup_start_lr=0.0001,
+                eta_min=TRAINING_CONFIG["cosine"]["eta_min"]
+            )
         elif scheduler_type == 'cosine_annealing':
             warmup_scheduler = LinearLR(self.optimizer, start_factor=0.1, total_iters=TRAINING_CONFIG["cosine"]["warmup_epochs"])
             cosine_scheduler = CosineAnnealingLR(self.optimizer, T_max=TRAINING_CONFIG["num_epoch"] - TRAINING_CONFIG["cosine"]["warmup_epochs"])
             self.scheduler = SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], [TRAINING_CONFIG["cosine"]["warmup_epochs"]])
+        elif scheduler_type == 'cosine_annealing_warm_restarts':
+            warmup_scheduler = LinearLR(
+                self.optimizer,
+                start_factor=0.1,
+                total_iters=TRAINING_CONFIG["cosine"]["warmup_epochs"]
+            )
+            restart_scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=TRAINING_CONFIG["cosine"]["first_restart"],  # First restart after 10 epochs
+                T_mult=2,  # Double the cycle length after each restart
+                eta_min=TRAINING_CONFIG["cosine"]["eta_min"]  # Minimum learning rate (adjust as needed)
+            )
+            self.scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, restart_scheduler],
+                milestones=[TRAINING_CONFIG["cosine"]["warmup_epochs"]]
+            )
         else:
             self.scheduler = None
 
-        # Loss function with label smoothing
-        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+        # # Loss function with label smoothing
+        # self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
         # Early stopping
         self.early_stopping = EarlyStopping(patience=early_stopping_patience)
@@ -271,9 +296,7 @@ class Trainer:
                 if TRAINING_CONFIG["mixed_precision"]:
                     # --- AMP block starts here ---
                     with autocast(dtype=torch.float16, device_type="cuda"):
-                        # output = self.model(data)
                         output = model(mixed_data)
-                        # loss = self.criterion(output, target)
                         loss = mixup_criterion(self.criterion, output, targets_a, targets_b, lam)
                         # Backward pass with gradient scaling
                     self.optimizer.zero_grad()
@@ -343,16 +366,16 @@ class Trainer:
                 )
 
                 # Additional detailed logging for specific batches
-                if True or batch_idx % 10 == 1:
+                if batch_idx % 10 == 1:
                     self.batch_logger.log_detailed_batch_info(self.model, self.train_loader, batch_idx, epoch, batch_time, loss.item())
                 # Log batch-level metrics occasionally
-                # if batch_idx % 25 == 0 or batch_idx == 0:
-                #     wandb.log({
-                #         "train/batch_loss": loss.item(),
-                #         "train/batch_idx": batch_idx
-                #     })
-            stop = time.time()
-            print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start:.2f} seconds ({total_data / num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
+                if batch_idx % 25 == 0 or batch_idx == 0:
+                    wandb.log({
+                        "train/batch_loss": loss.item(),
+                        "train/batch_idx": batch_idx
+                    })
+        stop = time.time()
+        print(f"[{stop}] epoch {epoch} done processing {total_data} positions in {num_batches} batches in {stop - start:.2f} seconds ({total_data / num_batches:.2f} ==? {TRAINING_CONFIG["batch_size"]})")
         return total_loss / num_batches
 
     def validate(self):
@@ -376,6 +399,7 @@ class Trainer:
 
         # Restore original parameters for next training epoch
         self.ema.restore()
+        torch.cuda.empty_cache()
         return total_loss / num_batches
 
     def train(self, num_epochs: int):
@@ -389,9 +413,12 @@ class Trainer:
         print(f"• Weight Decay: {self.optimizer.param_groups[0]['weight_decay']}")
         print(f"• Scheduler: {type(self.scheduler).__name__ if self.scheduler else 'None'}")
         print(f"• Early Stopping Patience: {self.early_stopping.patience}")
+        print(f"• Config: {TRAINING_CONFIG["config"]}")
         print("=" * 80)
 
         global_step = 0
+        torch.backends.cudnn.benchmark = True
+        best_val_loss = float('inf')
 
         for epoch in range(num_epochs):
             # Training
@@ -417,26 +444,45 @@ class Trainer:
                 else:
                     self.scheduler.step()
 
+            # Checkpoint saving logic
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                # Save model checkpoint
+                checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}.pth"
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                }, checkpoint_path)
+
+                print(f"\n💾 Saved new best model at epoch {epoch} with val loss {val_loss:.6f}")
+                wandb.save(checkpoint_path)
+
+                # Optional: Also log to W&B
+                wandb.log({"best_val_loss": val_loss, "best_epoch": epoch})
+
             # Early stopping check
             if self.early_stopping(val_loss, self.model):
                 print(f"\n🛑 Early stopping triggered at epoch {epoch}")
                 wandb.log({"training/early_stopped": True, "training/early_stop_epoch": epoch + 1}, commit=True)
                 break
 
-            # Progress reporting
-            if True or (epoch + 1) % 10 == 0 or epoch == 0:
-                print(f"📊 Epoch {epoch:3d}/{num_epochs}")
-                print(f"   • Train Loss: {train_loss:.6f}")
-                print(f"   • Val Loss:   {val_loss:.6f}")
-                print(f"   • LR:         {current_lr:.2e}")
-                print(f"   • Duration:   {time.time() - start:.2f} seconds")
-                print("-" * 40)
+
+            print(f"📊 Epoch {epoch:3d}/{num_epochs}")
+            print(f"   • Train Loss: {train_loss:.6f}")
+            print(f"   • Val Loss:   {val_loss:.6f}")
+            print(f"   • LR:         {current_lr:.2e}")
+            print(f"   • Duration:   {time.time() - start:.2f} seconds")
+            print("-" * 40)
 
             global_step += 1
 
         # Final model save to W&B
-        torch.save(self.model.state_dict(), "data/enhanced_chess_cnn_final.pth")
-        wandb.save("enhanced_chess_cnn_final.pth")
+        torch.save(self.model.state_dict(), f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_final.pth")
+        wandb.save(f"{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_final.pth")
 
         # Log final metrics
         wandb.log({
@@ -454,124 +500,3 @@ class Trainer:
             'val_losses': self.val_losses,
             'learning_rates': self.learning_rates
         }
-
-# Load processed training data
-def load_chess_training_data(filename):
-    with open(filename, 'rb') as f:
-        training_data = pickle.load(f)
-    return training_data
-
-def create_enhanced_chess_model_with_validation(config=None):
-    """
-    Factory function to create enhanced chess model with comprehensive validation.
-    """
-    if config is None:
-        config = TRAINING_CONFIG["config"]
-
-    print("🏗️  CREATING ENHANCED CHESS CNN MODEL")
-    print("=" * 80)
-
-    # Create model
-    if TRAINING_CONFIG["device"] == "cuda" and not torch.cuda.is_available():
-        raise Exception("CUDA required in TRAINING_CONFIG but not available")
-    model = EnhancedChessCNNV2(**config).to('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else "cpu")
-
-    print(f"EnhancedChessCNN is using device {next(model.parameters()).device}")
-    if TRAINING_CONFIG["device"] == "cuda":
-        if not all(param.device.type == 'cuda' for param in model.parameters()):
-            raise Exception(f"CUDA device not configured in a parameter but CUDA Expected.")
-        if not all(buffer.device.type == 'cuda' for buffer in model.buffers()):
-            raise Exception(f"CUDA device not configured in a buffer but CUDA Expected.")
-        print(f"EnhancedChessCNN Parameters and buffers validated with CUDA")
-
-    # Validate configuration
-    validator = ModelValidator()
-    validation_results = validator.validate_configuration(config)
-
-    if not validation_results['valid']:
-        raise ValueError(f"Invalid configuration: {validation_results['errors']}")
-
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print(f"✅ Enhanced Chess CNN created successfully!")
-    print(f"📊 Total Parameters: {total_params:,}")
-    print(f"💾 Estimated Model Size: {total_params * 4 / (1024 ** 2):.2f} MB")
-
-    if validation_results['warnings']:
-        print(f"⚠️  {len(validation_results['warnings'])} warnings found")
-
-    print("=" * 80)
-
-    return model, config
-
-
-# Example usage with comprehensive setup
-if __name__ == "__main__":
-    # Set spawn method explicitly (Windows default, but be explicit)
-    mp.set_start_method('spawn', force=True)
-    # mmap_file = 'data/mvl_train_data' #MVL games only, for shorter epochs
-    train_type = "all_train_data_with_puzzles"
-    mmap_file = f'data/{train_type}'
-
-    print("🎯 ENHANCED CHESS CNN WITH W&B INTEGRATION")
-    print("=" * 80)
-
-    # Create enhanced model with validation
-    model, config = create_enhanced_chess_model_with_validation()
-
-    # Example training setup (requires actual data loaders)
-    # training_data = load_chess_training_data(pkl_file)
-
-    dataset = MemmapChessDataset(mmap_file)
-    print(f"Loaded training data from {mmap_file}")
-    train_loader, val_loader = create_optimized_dataloaders(dataset, batch_size=TRAINING_CONFIG["batch_size"])
-
-    # train_loader, val_loader = create_chess_data_loaders(
-    #     training_data,
-    #     train_split=0.8,
-    #     batch_size= TRAINING_CONFIG["batch_size"],  # To be adjusted
-    #     num_workers= TRAINING_CONFIG["num_workers"]  # 8 cores, 16 logical cores
-    # )
-
-    print(f"Reviewing device of data loaders from {mmap_file}")
-    d, t = next(iter(val_loader))
-    print(f"pre-training val_loader: Data {len(d)} device: {d.device}")
-    print(f"pre-training val_loader: Target {len(t)} device: {t.device}")
-    d, t = next(iter(train_loader))
-    print(f"pre-training train_loader: Data {len(d)} device: {d.device}")
-    print(f"pre-training train_loader: Target {len(t)} device: {t.device}")
-
-
-    # Initialize trainer with W&B integration
-    trainer = Trainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config=config,
-        project_name=f"chess-cnn",
-        experiment_name=f"run-{train_type}-{TRAINING_CONFIG["version"]}",
-        learning_rate=TRAINING_CONFIG["learning_rate"],
-        weight_decay=TRAINING_CONFIG["weight_decay"],
-        scheduler_type=TRAINING_CONFIG["scheduler_type"],
-        early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
-    )
-    print(f"Model should be on CUDA: {next(model.parameters()).device}")
-
-
-    # Print comprehensive model summary
-    trainer.print_model_summary()
-
-    # Validate model setup
-    trainer.validate_model_setup()
-
-    if train_loader is not None and val_loader is not None:
-        # Train the model
-        training_history = trainer.train(num_epochs=TRAINING_CONFIG["num_epoch"])
-        # Close W&B run
-        wandb.finish()
-    else:
-        print("⚠️  Training data loaders not provided. Model created but not trained.")
-        print("   To train, provide train_loader and val_loader parameters.")
-
-    print("\n✅ Enhanced Chess CNN setup completed!")

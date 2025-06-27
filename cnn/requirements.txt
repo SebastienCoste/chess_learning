@@ -50,3 +50,5 @@ cairosvg>=2.5.0  # For SVG rendering
 # Additional utilities
 psutil>=5.9.0  # For system monitoring
 requests>=2.28.0
+lightning-bolts
+torchinfo

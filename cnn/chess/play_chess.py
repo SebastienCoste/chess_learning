@@ -150,8 +150,8 @@ def main():
     if not model_path:
         model_path = input("Enter the path to your model file (e.g. chessMVLv3.pth): ").strip()
         if not model_path:
-            print("No model specified. Using models/35kGMgamesAndPuzzles.pth.")
-            model_path = "./models/35kGMgamesAndPuzzles.pth"
+            print("No model specified. Using models/chess_gm_puzzle_v4.1_cp1.pth.")
+            model_path = "./models/chess_gm_puzzle_v4.1_cp1.pth"
 
     
     # Initialize components

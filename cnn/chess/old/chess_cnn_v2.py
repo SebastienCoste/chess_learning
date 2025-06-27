@@ -4,7 +4,7 @@ import torch
 
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.cnn.modules.dense_block import DenseBlock, TransitionLayer
-from cnn.chess.components.cnn.data_manip.mish_activation import MishActivation
+from cnn.chess.components.cnn.modules.mish_activation import MishActivation
 from cnn.chess.components.cnn.modules.multi_scale_feature_extraction import MultiScaleConv
 from cnn.chess.components.cnn.modules.residual_block import SEResidualBlock
 from cnn.chess.components.cnn.modules.spatial_attention import SpatialAttention, SimplifiedSelfAttention
@@ -15,12 +15,12 @@ from cnn.chess.components.cnn.modules.stochastic_depth import StochasticDepth
 def get_activation_function(activation_name='gelu'):
     """Factory function to get activation functions."""
     activations = {
-        'relu': nn.ReLU,
-        'gelu': nn.GELU,
-        'mish': MishActivation,
+        'relu': lambda: nn.ReLU(inplace=True),
+        'gelu': lambda: nn.GELU(),
+        'mish': lambda: MishActivation(inplace=True),
         'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
     }
-    return activations.get(activation_name.lower(), nn.GELU)
+    return activations.get(activation_name.lower(), lambda: nn.GELU())
 
 class EnhancedChessCNNV2(nn.Module):
     """
@@ -38,9 +38,6 @@ class EnhancedChessCNNV2(nn.Module):
             dropout_rate=0.3,
             batch_norm=True,
             activation='gelu',
-            use_attention=True,
-            use_transformer_blocks=True,
-            num_transformer_layers=2,
             transformer_heads=8,
             kernel_size = TRAINING_CONFIG["kernel_size"],
     ):
@@ -53,10 +50,7 @@ class EnhancedChessCNNV2(nn.Module):
         self.board_size = board_size
         self.conv_filters = conv_filters
         self.fc_layers = fc_layers
-        self.dropout_rate = dropout_rate
         self.batch_norm = batch_norm
-        self.use_attention = use_attention
-        self.use_transformer_blocks = use_transformer_blocks
         self.kernel_size = kernel_size
 
         # Get activation function
@@ -65,23 +59,25 @@ class EnhancedChessCNNV2(nn.Module):
         # Positional encoding
         self.pos_encoding = PositionalEncoding2D(input_channels, board_size, board_size)
         # Initial convolution
-        self.initial_conv = MultiScaleConv(input_channels, 64)
+        self.initial_conv = MultiScaleConv(input_channels, 64, activation_fn)
+        self.spatial_dropout1 = nn.Dropout2d(p=0.3)  # Spatial dropout for conv layers
         # Dense blocks with transition layers
-        self.dense_block1 = DenseBlock(64, growth_rate=32, num_layers=4)
+        self.dense_block1 = DenseBlock(64, growth_rate=32, num_layers=4, activation_fn = activation_fn)
         in_channels = 64 + 4 * 32  # Initial + growth_rate * num_layers
-        self.transition1 = TransitionLayer(in_channels, in_channels // 2)
+        self.transition1 = TransitionLayer(in_channels, in_channels // 2, activation_fn = activation_fn)
 
         # SE-ResNet block
-        self.se_block = SEResidualBlock(in_channels // 2, activation_fn)
+        self.se_block = SEResidualBlock(in_channels // 2, activation_fn = activation_fn)
 
         # Spatial attention
         self.spatial_attn = SpatialAttention()
 
         # Simplified self-attention
-        self.self_attn = SimplifiedSelfAttention(embed_dim=96, num_heads=4) #or embed_dim = 128 ?
+        self.self_attn = SimplifiedSelfAttention(embed_dim=96, num_heads=transformer_heads) #or embed_dim = 128 ?
 
         # Stochastic depth
         self.stochastic_depth = StochasticDepth(drop_prob=0.1)
+        self.dropout1 = nn.Dropout(dropout_rate)
 
         # Output layers
         self.flatten = nn.Flatten()
@@ -96,6 +92,7 @@ class EnhancedChessCNNV2(nn.Module):
             dummy_input = torch.randn(1, TRAINING_CONFIG["input_channels"], TRAINING_CONFIG["board_size"], TRAINING_CONFIG["board_size"])
             x = dummy_input
             #Reproducing what we have above
+            x = self.pos_encoding(x)
             x = self.initial_conv(x)
             x = self.dense_block1(x)
             x = self.transition1(x)
@@ -127,10 +124,15 @@ class EnhancedChessCNNV2(nn.Module):
 
     def forward(self, x):
         # Multi-scale feature extraction
+        # Apply positional encoding FIRST
+        x = self.pos_encoding(x)
+
         x = self.initial_conv(x)
+        x = self.spatial_dropout1(x)  # Apply after activation
 
         # Dense connectivity
         x = self.dense_block1(x)
+        x = self.dropout1(x)  # Regular dropout for FC layers
         x = self.transition1(x)
 
         # SE-ResNet with stochastic depth

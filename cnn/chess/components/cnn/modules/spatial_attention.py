@@ -101,7 +101,7 @@ class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=TRAINING_CONFIG["spatial_kernel_size"]):
         super(SpatialAttention, self).__init__()
         self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2)
-        self.sigmoid = nn.Sigmoid()
+        self.regulation = nn.GELU() #nn.Sigmoid()
 
     def forward(self, x):
         # Generate spatial attention map
@@ -111,4 +111,4 @@ class SpatialAttention(nn.Module):
         y = self.conv(y)
 
         # Apply spatial attention
-        return x * self.sigmoid(y)
+        return x * self.regulation(y)

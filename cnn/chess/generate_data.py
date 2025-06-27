@@ -1,3 +1,4 @@
+import platform
 import random
 import os
 import gc
@@ -7,7 +8,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Dict, Tuple
+import atexit
 
+from cnn.chess.components.config import TRAINING_CONFIG
+from cnn.chess.components.data_prep.lru_memmap import LRUCachedMemmapDataset
+# from cnn.chess.components.data_prep.optimized_memap import OptimizedMemmapChessDataset
+from cnn.chess.components.data_prep.shared_cache_memmap import SharedMemoryCachedDataset
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
 
 
@@ -91,26 +97,38 @@ class ChessTrainingDataGenerator:
 
         return training_data
 
+# Global dictionary for process-specific arrays
+process_arrays = {}
 
-class ChessDataset(Dataset):
-    """PyTorch Dataset for chess training data."""
+@atexit.register
+def cleanup():
+    for pid, (inputs, outputs) in process_arrays.items():
+        del inputs  # Close memmap files
+        del outputs
+    torch.cuda.empty_cache()
 
-    def __init__(self, training_data: List[Dict]):
-        self.data = training_data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        #if sent to CUDA, DataLoader.pin_memory needs to be set to false, because it's used to optimize the migration from CPU to CUDA
-        input_tensor = torch.FloatTensor(item['input'])#.to('cuda' if TRAINING_CONFIG["device"] == "cuda" else 'cpu')
-        output_tensor = torch.FloatTensor(item['output'])#.to('cuda' if TRAINING_CONFIG["device"] == "cuda" else 'cpu')
-        return input_tensor, output_tensor
-
-
-def create_optimized_dataloaders(dataset, batch_size=512):
+def create_optimized_dataloaders(dataset, base_path, batch_size=TRAINING_CONFIG["batch_size"], cache_type = TRAINING_CONFIG["cache_type"]):
     """Create CUDA-optimized data loaders"""
+    worker_init_fn = None
+    if cache_type == "lru":
+        # Use LRU cache
+        print("Using LRU cache")
+        cached_dataset = LRUCachedMemmapDataset(dataset.base_path)
+    elif cache_type == "shared":
+        # Use shared memory cache
+        print("Using shared cache")
+        cached_dataset = SharedMemoryCachedDataset(dataset.base_path)
+        cache_name = cached_dataset.setup_shared_cache()
+
+        # Configure workers to attach to shared cache
+        def worker_init_fn(worker_id):
+            worker_dataset = cached_dataset
+            worker_dataset.attach_to_shared_cache(cache_name)
+    else:
+        # Use optimized memmap
+        print("Using optimized cache")
+        cached_dataset = OptimizedMemmapChessDataset(dataset.base_path)
+        worker_init_fn = None
 
     # Split dataset
     train_size = int(0.8 * len(dataset))
@@ -119,74 +137,52 @@ def create_optimized_dataloaders(dataset, batch_size=512):
         dataset, [train_size, val_size]
     )
 
+    is_windows = platform.system() == 'Windows'
+
+    def worker_init_fn_win(worker_id):
+        # Initialize arrays for this worker
+        pid = os.getpid()
+        base_path = worker_init_fn_win.base_path  # Set before creating DataLoader
+        if pid not in process_arrays:
+            inputs = np.memmap(f"{base_path}_inputs.dat",
+                               dtype=np.float32, mode='r',
+                               shape=(worker_init_fn_win.length, 19, 8, 8))
+            outputs = np.memmap(f"{base_path}_outputs.dat",
+                                dtype=np.float32, mode='r',
+                                shape=(worker_init_fn_win.length, 4096))
+            process_arrays[pid] = (inputs, outputs)
+
+    if is_windows:
+        # Before creating DataLoader
+        worker_init_fn_win.base_path = base_path
+        meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
+        worker_init_fn_win.length = int(meta['length'])
+
     # Optimized loader configuration
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
-        num_workers=8,  # Increase based on CPU cores
-        pin_memory=True,  # Enable fast CPU->GPU transfer
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=4  # Prefetch multiple batches
+        shuffle=False,              # Disable shuffling for better cache locality
+        num_workers=TRAINING_CONFIG["num_workers"],              # Reduced workers to prevent memory pressure
+        pin_memory=False,           # Disable to reduce memory pressure
+        prefetch_factor=1,          # Minimal prefetch
+        persistent_workers=not is_windows,    # Reuse workers
+        worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size * 2,  # Larger batch for validation
         shuffle=False,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True
+        num_workers=TRAINING_CONFIG["num_workers"],
+        pin_memory=False,
+        prefetch_factor=1,
+        persistent_workers=True,
+        worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
     )
 
-    return train_loader, val_loader
+    return train_loader, val_loader, cached_dataset
 
-
-def create_chess_data_loaders(
-        training_data: List[Dict],
-        batch_size,
-        num_workers,
-        train_split: float = 0.8,
-) -> Tuple[DataLoader, DataLoader]:
-    """Create training and validation data loaders."""
-
-    # Split data
-    split_idx = int(len(training_data) * train_split)
-    train_data = training_data[:split_idx]
-    val_data = training_data[split_idx:]
-
-    print(f"Training set: {len(train_data)} examples")
-    print(f"Validation set: {len(val_data)} examples")
-
-    # Create datasets
-    train_dataset = ChessDataset(train_data)
-    val_dataset = ChessDataset(val_data)
-
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=True, # Keep workers alive between epochs
-        prefetch_factor=4       # Prefetch multiple batches
-        # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size * 2,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=False,
-        persistent_workers=True, # Keep workers alive between epochs
-        # pin_memory_device=TRAINING_CONFIG["device"], #RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned
-    )
-
-    return train_loader, val_loader
 
 def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
     """Load all games from the PGN file"""
@@ -218,12 +214,29 @@ def aggregate_pgn_games(directory, max_games):
     random.shuffle(all_games)
     return all_games
 
+
+def build_ios(file, pos):
+    inputs_mmap = np.memmap(f'{file}_{pos}_inputs.dat', dtype=np.float32, mode='w+',
+                            shape=(estimated_positions_count, 19, 8, 8))
+    outputs_mmap = np.memmap(f'{file}_{pos}_outputs.dat', dtype=np.float32, mode='w+',
+                             shape=(estimated_positions_count, 4096))
+    metadata = {
+        'move_uci': [],
+        'fen': [],
+        'move_number': [],
+        # Add other metadata fields as needed
+    }
+    return inputs_mmap, outputs_mmap, metadata
+
 # Example usage
 if __name__ == "__main__":
     # Sample master game
-    mmap_filename = "data/all_train_data_with_puzzles_v2"
+    mmap_filename = "data/all_train_data_with_puzzles_v3"
     max_games = 10_000_000
     estimated_positions_count = 16_667_704 + 10 # used to allocate space
+    split = 5
+    current_split = 0
+
     fail_if_more_positions_available = True
     print("Loading PGN games...")
     games = []
@@ -234,16 +247,8 @@ if __name__ == "__main__":
     # Process the game
     generator = ChessTrainingDataGenerator()
 
-    inputs_mmap = np.memmap(f'{mmap_filename}_inputs.dat', dtype=np.float32, mode='w+',
-                            shape=(estimated_positions_count, 19, 8, 8))
-    outputs_mmap = np.memmap(f'{mmap_filename}_outputs.dat', dtype=np.float32, mode='w+', shape=(estimated_positions_count, 4096))
+    inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split)
 
-    metadata = {
-        'move_uci': [],
-        'fen': [],
-        'move_number': [],
-        # Add other metadata fields as needed
-    }
     idx = 0
     for i, game in enumerate(games):
         if i % 100 == 0:
@@ -263,19 +268,27 @@ if __name__ == "__main__":
                 metadata['move_number'].append(item['move_number'])
                 idx += 1
                 if idx % 100_000 == 0:
-                    print(f"Flushing to mmap game {idx}")
+                    print(f"Flushing to mmap split {current_split} game {idx}")
                     inputs_mmap.flush()
                     outputs_mmap.flush()
         except Exception as e:
             print(f"Error processing game {i}: {e}")
             continue
+        if i > (estimated_positions_count // split) * (current_split + 1):
+            current_split += 1
+            inputs_mmap.flush()
+            outputs_mmap.flush()
+            np.savez(f'{mmap_filename}_{current_split}_meta.npz', **metadata, length=idx)
+            print(f"Generated split {current_split} of training in {mmap_filename}")
+            inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split)
+
 
     # Optionally, trim arrays if you overestimated num_examples
     inputs_mmap.flush()
     outputs_mmap.flush()
 
     # Save metadata and actual length
-    np.savez(f'{mmap_filename}_meta.npz', **metadata, length=idx)
+    np.savez(f'{mmap_filename}_{current_split}_meta.npz', **metadata, length=idx)
     print(f"Generated {idx} training examples in {mmap_filename}")
     del inputs_mmap
     del outputs_mmap
