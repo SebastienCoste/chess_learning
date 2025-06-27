@@ -1,23 +1,24 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
+
 
 class MishActivation(nn.Module):
     """
     Mish activation function implementation.
     Mish(x) = x * tanh(softplus(x))
     """
+    __constants__ = ["inplace"]
+    inplace: bool
 
-    def __init__(self):
+    def __init__(self, inplace: bool = False):
         super().__init__()
-        # Use built-in Mish if available (PyTorch 1.9+)
-        if hasattr(F, 'mish'):
-            self.act = F.mish
-        else:
-            self.act = self._mish_implementation
+        self.inplace = inplace
 
-    def _mish_implementation(self, x):
-        return x * torch.tanh(F.softplus(x))
+    def forward(self, input: Tensor) -> Tensor:
+        return F.mish(input, inplace=self.inplace)
 
-    def forward(self, x):
-        return self.act(x)
+    def extra_repr(self) -> str:
+        inplace_str = "inplace=True" if self.inplace else ""
+        return inplace_str

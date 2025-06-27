@@ -3,9 +3,10 @@ import chess
 import numpy as np
 from typing import Optional
 
+from cnn.chess.components.cnn.chess_cnn_v3 import EnhancedChessCNNV3
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
-from cnn.chess.components.cnn.chess_cnn import EnhancedChessCNN
-from cnn.chess.components.cnn.chess_cnn_v2 import EnhancedChessCNNV2
+from cnn.chess.old.chess_cnn import EnhancedChessCNN
+from cnn.chess.old.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess.components.config import TRAINING_CONFIG
 
 
@@ -24,6 +25,8 @@ class SimpleChessEngine:
                     self.model = (EnhancedChessCNNV2(**TRAINING_CONFIG["config"]))
                 elif version == 1:
                     self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
+                elif version == 3:
+                    self.model = EnhancedChessCNNV3(**TRAINING_CONFIG["config"])
                 else:
                     raise ValueError("Invalid version")
 

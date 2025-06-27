@@ -22,9 +22,9 @@ class EfficientBatchLogger:
                 "batch/running_avg_loss": avg_loss,
                 "batch/accuracy": accuracy,
                 "batch/learning_rate": learning_rate,
-                "batch/batch_idx": batch_idx
+                "batch/batch_idx": batch_idx,
+                "train/batch_idx": batch_idx
             }, commit=False)
-
             # Reset accumulators
             self.running_loss = 0.0
             self.batch_count = 0
@@ -50,6 +50,8 @@ class EfficientBatchLogger:
         # Comprehensive logging
         wandb.log({
             "detailed/epoch": epoch,
+            "detailed/loss": loss,
+            "detailed/batch_idx": batch_idx,
             "detailed/batch_time": batch_time,
             "detailed/gpu_memory_gb": gpu_memory,
             "detailed/gpu_cached_gb": gpu_cached,

@@ -1,8 +1,8 @@
 import numpy as np
-import os
 import torch
-from torch.utils.data import Dataset, DataLoader
-
+from torch.utils.data import Dataset
+import threading
+import os
 
 def convert_pickle_to_memmap(pickle_file, output_base):
     """Convert existing pickle data to memory-mapped format"""
@@ -67,9 +67,37 @@ class MemmapChessDataset(Dataset):
         return self.length
 
 
+# Global dictionary for process-specific arrays
+process_arrays = {}
 
 
 class MemmapChessDatasetWindows(Dataset):
+    def __init__(self, base_path):
+        self.base_path = base_path
+        meta_path = f"{base_path}_meta.npz"
+        self.length = int(np.load(meta_path, allow_pickle=True)['length'])
+
+    def __getitem__(self, idx):
+        pid = os.getpid()
+
+        # Initialize arrays for this process if not exist
+        if pid not in process_arrays:
+            inputs = np.memmap(f"{self.base_path}_inputs.dat",
+                               dtype=np.float32, mode='r',
+                               shape=(self.length, 19, 8, 8))
+            outputs = np.memmap(f"{self.base_path}_outputs.dat",
+                                dtype=np.float32, mode='r',
+                                shape=(self.length, 4096))
+            process_arrays[pid] = (inputs, outputs)
+
+        inputs, outputs = process_arrays[pid]
+        return torch.from_numpy(inputs[idx].copy()), torch.from_numpy(outputs[idx].copy())
+
+    def __len__(self):
+        return self.length
+
+
+class MemmapChessDatasetWindowsNoThread(Dataset):
     def __init__(self, base_path):
         self.base_path = base_path
         # Load metadata without keeping file handles
