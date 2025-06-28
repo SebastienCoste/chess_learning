@@ -229,7 +229,7 @@ class Trainer:
         os.system('sync; echo 1 > /proc/sys/vm/drop_caches')
 
         # 2. Release memory-mapped files
-        os.system(f'fuser -k /path/to/{self.dataset_rootname}*.dat')  # Kill processes
+        os.system(f'fuser -k {self.dataset_rootname}*.dat')  # Kill processes
 
     def train_epoch(self, epoch):
         # Get model device dynamically

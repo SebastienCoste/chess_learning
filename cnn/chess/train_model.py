@@ -125,10 +125,11 @@ def optimize_system_settings():
     print("✓ System optimizations applied")
 
 
-def create_trainer(m, trains, validate, data: list[Dataset]):
+def create_trainer(m, ds_root, trains, validate, data: list[Dataset]):
     return Trainer(
         model=m,
         dataset=data,
+        dataset_rootname = ds_root,
         train_loaders=trains,
         val_loader=validate,
         project_name=f"chess-cnn",
@@ -169,11 +170,11 @@ if __name__ == "__main__":
 
     print(f"train_loaders has {len(train_loaders)} datasets")
     # Initialize trainer with W&B integration
-    trainer = create_trainer(model, train_loaders, val_loader, cached_datasets)
+    trainer = create_trainer(model, mmap_file, train_loaders, val_loader, cached_datasets)
     print(f"Model should be on CUDA: {next(model.parameters()).device}")
 
     # Print comprehensive model summary
-    create_trainer(uncompiled_model, train_loaders, val_loader, cached_datasets).print_model_summary()
+    create_trainer(uncompiled_model, mmap_file, train_loaders, val_loader, cached_datasets).print_model_summary()
 
     # Validate model setup
     trainer.validate_model_setup()
