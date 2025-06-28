@@ -1,3 +1,4 @@
+import platform
 import time
 import warnings
 
@@ -46,6 +47,7 @@ class Trainer:
             dataset: list[Dataset],
             train_loaders,
             val_loader,
+            dataset_rootname: str,
             project_name: str = "chess-cnn",
             experiment_name: str = None,
             learning_rate: float = 0.001,
@@ -59,6 +61,7 @@ class Trainer:
             raise Exception(f"next(self.model.parameters()).device should be {TRAINING_CONFIG["device"]} but is {self.device}")
         print(f"✓ Training on CUDA with {len(train_loaders)} training datasets")
 
+        self.dataset_rootname = dataset_rootname
         self.train_loaders = train_loaders
         self.dataset = dataset
         self.val_loader = val_loader
@@ -192,6 +195,41 @@ class Trainer:
     def validate_model_setup(self):
         ModelValidator().validate_all(self.model)
 
+    def _cleanup_epoch(self, cycle):
+        """Release resources after each epoch"""
+        if hasattr(self.train_loaders[cycle], 'clear_cache'):
+            self.train_loaders[cycle].clear_cache()
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        if hasattr(self.train_loaders[cycle], '_inputs'):
+            os.close(self.train_loaders[cycle]._inputs)
+        if hasattr(self.train_loaders[cycle], '_outputs'):
+            os.close(self.train_loaders[cycle]._outputs)
+        if not platform.system() == 'Windows':
+            self._release_linux_resources()
+
+    def _cleanup_validation(self):
+        """Release resources after each epoch"""
+        if hasattr(self.val_loader, 'clear_cache'):
+            self.val_loader.clear_cache()
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        if hasattr(self.val_loader, '_inputs'):
+            os.close(self.val_loader._inputs)
+        if hasattr(self.val_loader, '_outputs'):
+            os.close(self.val_loader._outputs)
+        if not platform.system() == 'Windows':
+            self._release_linux_resources()
+
+    def _release_linux_resources(self):
+        """Release Linux-specific resources"""
+        # 1. Clear page cache (requires sudo)
+        os.system('sync; echo 1 > /proc/sys/vm/drop_caches')
+
+        # 2. Release memory-mapped files
+        os.system(f'fuser -k /path/to/{self.dataset_rootname}*.dat')  # Kill processes
 
     def train_epoch(self, epoch):
         # Get model device dynamically
@@ -268,7 +306,7 @@ class Trainer:
                         f"Cache utilization: {stats['cache_size']}/{stats['capacity']} | "
                     )
                 else:
-                    print(f"Batch {batch_idx:5d} | Loss: {loss.item():.4f} | "
+                    print(f"Batch {batch_idx:5d} | Loss: {loss.item() * self.accumulation_steps:.4f} | "
                         f"Throughput: {throughput:.2f} samples/sec")
 
                 self.batch_logger.log_batch_metrics(
@@ -334,10 +372,11 @@ class Trainer:
             # Training
             start = time.time()
             train_loss = self.train_epoch(epoch)
-
+            self._cleanup_epoch(epoch)
             # Validation
-            if epoch % len(self.train_loaders) == 0 and epoch != 0:
+            if epoch % len(self.train_loaders) == len(self.train_loaders) - 1:
                 val_loss = self.validate()
+                self._cleanup_validation()
 
                 # Record metrics
                 self.train_losses.append(train_loss)

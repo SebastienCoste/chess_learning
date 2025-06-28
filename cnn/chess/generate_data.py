@@ -185,7 +185,7 @@ def create_optimized_dataloaders(datasets, base_path, batch_size=TRAINING_CONFIG
                 num_workers=TRAINING_CONFIG["num_workers"],              # Reduced workers to prevent memory pressure
                 pin_memory=True,           # Disable to reduce memory pressure
                 prefetch_factor=2,          # Minimal prefetch
-                persistent_workers=not is_windows,    # Reuse workers
+                persistent_workers= False, # because each epoch runs a different DS #not is_windows,    # Reuse workers
                 worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
             )
         )
@@ -197,7 +197,7 @@ def create_optimized_dataloaders(datasets, base_path, batch_size=TRAINING_CONFIG
         num_workers=TRAINING_CONFIG["num_workers"],
         pin_memory=True,
         prefetch_factor=2,
-        persistent_workers=True,
+        persistent_workers= False, # because each epoch runs a different DS #not is_windows,
         worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
     )
 
