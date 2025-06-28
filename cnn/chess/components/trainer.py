@@ -50,8 +50,6 @@ class Trainer:
             dataset_rootname: str,
             project_name: str = "chess-cnn",
             experiment_name: str = None,
-            learning_rate: float = 0.001,
-            weight_decay: float = 1e-4,
             scheduler_type: str = 'reduce_on_plateau',
             early_stopping_patience: int = 10
     ):
@@ -89,15 +87,30 @@ class Trainer:
         if TRAINING_CONFIG["with_ema"]:
             self.ema = EMA(model, decay=0.999)
 
+        attention_params = []
+        other_params = []
+
+        for name, param in model.named_parameters():
+            if 'attention' in name:
+                attention_params.append(param)
+            else:
+                other_params.append(param)
+
+        self.optimizer  = torch.optim.AdamW([
+            {'params': attention_params, 'lr': TRAINING_CONFIG["learning_rate"], 'weight_decay': TRAINING_CONFIG["attention"]["weight_decay"]},
+            {'params': other_params, 'lr': TRAINING_CONFIG["attention"]["learning_rate"], 'weight_decay': TRAINING_CONFIG["weight_decay"]},
+        ])
+
+
         # Optimizer with weight decay (L2 regularization)
-        self.optimizer = optim.AdamW(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            fused=True  # PyTorch 2.0+ fused optimizer
-        )
+        # self.optimizer = optim.AdamW(
+        #     model.parameters(),
+        #     lr=TRAINING_CONFIG["learning_rate"],
+        #     weight_decay=TRAINING_CONFIG["weight_decay"],
+        #     betas=(0.9, 0.999),
+        #     eps=1e-8,
+        #     fused=True  # PyTorch 2.0+ fused optimizer
+        # )
 
         self.scaler = GradScaler() #For AMP
         self.criterion = nn.CrossEntropyLoss()  # Simple, fast loss
@@ -229,7 +242,7 @@ class Trainer:
         os.system('sync; echo 1 > /proc/sys/vm/drop_caches')
 
         # 2. Release memory-mapped files
-        os.system(f'fuser -k /path/to/{self.dataset_rootname}*.dat')  # Kill processes
+        os.system(f'fuser -k {self.dataset_rootname}*.dat')  # Kill processes
 
     def train_epoch(self, epoch):
         # Get model device dynamically
