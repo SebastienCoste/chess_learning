@@ -9,7 +9,7 @@ TRAINING_CONFIG = {
     "board_size": 8,
     "batch_size": 2048,  # To be adjusted. 128 is way too small5
     "num_workers": 10, #8 cores, 16 virtual workers
-    "version": "v5.2",
+    "version": "v5.3",
     "learning_rate": 0.0003,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
     "scheduler_type": 'cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
@@ -20,7 +20,7 @@ TRAINING_CONFIG = {
     "gradient_clipping": 0.5, #Reduced from 1.0 because of gradient instability
     'accumulation_steps': 4,
     "pth_file": "chess_gm_puzzle",
-    "cache_type": "lru", # lru or shared
+    "cache_type": "none", # lru or shared
     "config": {
             'input_channels': INPUT_CHANNEL,
             'board_size': 8,
@@ -46,13 +46,38 @@ cache OptimizedMemmapChessDataset (other)
 activation: mish
 
 Throughput samples/sec at 500k samples: 
-Baseline            : 2000 (batch 500)
-Batch -> 2048       : 2000 (batch 250)
-num worker -> t:24  : 3600 (SSD working a lot more, so maybe ram loaded faster?)
-cache -> lru        : 3700 (no cache hit rate, some better spikes of GPU)
-num worker -> t:12  : 3830
-num worker -> t:6   : 3770 
-num worker -> t:10  : 3760 (going back to 6 the variation is not significant)
-activate -> relu    : 3900
-
+Baseline                        : 2000 (batch 500)
+Batch -> 2048                   : 2000 (batch 250)
+num worker -> t:24              : 3600 (SSD working a lot more, so maybe ram loaded faster?)
+cache -> lru                    : 3700 (no cache hit rate, some better spikes of GPU)
+num worker -> t:12              : 3830
+num worker -> t:6               : 3770 
+num worker -> t:10              : 3760 (going back to 6 the variation is not significant)
+activate -> relu                : 3900
+split dataset in 80Gb chunks    : 8750 (18500 by end of epoch 0)
+back to optim cache (other)     : 4240 (!!!)
+cache -> shared                 : failing, leaky memory
+cache -> none                   : 9000 (!!!...!!!) (cache was a waste of time ^^) 
+pin_memory -> True, prefetch 2  : 
+shuffle train -> True           : 
 '''
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

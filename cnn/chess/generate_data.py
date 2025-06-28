@@ -1,18 +1,24 @@
+import atexit
+import os
 import platform
 import random
-import os
-import gc
+import sys
+from typing import List, Dict
+
 import chess
 import chess.pgn
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from typing import List, Dict, Tuple
-import atexit
+from torch.utils.data import DataLoader
+
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(project_root)
 
 from cnn.chess.components.config import TRAINING_CONFIG
 from cnn.chess.components.data_prep.lru_memmap import LRUCachedMemmapDataset
-# from cnn.chess.components.data_prep.optimized_memap import OptimizedMemmapChessDataset
+if not platform.system() == 'Windows':
+    from cnn.chess.components.data_prep.optimized_memap import OptimizedMemmapChessDataset
 from cnn.chess.components.data_prep.shared_cache_memmap import SharedMemoryCachedDataset
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
 
@@ -107,35 +113,45 @@ def cleanup():
         del outputs
     torch.cuda.empty_cache()
 
-def create_optimized_dataloaders(dataset, base_path, batch_size=TRAINING_CONFIG["batch_size"], cache_type = TRAINING_CONFIG["cache_type"]):
+def create_optimized_dataloaders(datasets, base_path, batch_size=TRAINING_CONFIG["batch_size"], cache_type = TRAINING_CONFIG["cache_type"]):
     """Create CUDA-optimized data loaders"""
     worker_init_fn = None
-    if cache_type == "lru":
-        # Use LRU cache
-        print("Using LRU cache")
-        cached_dataset = LRUCachedMemmapDataset(dataset.base_path)
-    elif cache_type == "shared":
-        # Use shared memory cache
-        print("Using shared cache")
-        cached_dataset = SharedMemoryCachedDataset(dataset.base_path)
-        cache_name = cached_dataset.setup_shared_cache()
+    cached_datasets = []
+    print(f"Received {len(datasets)} training and val sets")
+    for ds in datasets:
+        if cache_type == "lru":
+            # Use LRU cache
+            print("Using LRU cache")
+            cached_dataset = LRUCachedMemmapDataset(ds.base_path)
+        elif cache_type == "shared":
+            # Use shared memory cache
+            print("Using shared cache")
+            cached_dataset = SharedMemoryCachedDataset(ds.base_path)
+            cache_name = cached_dataset.setup_shared_cache()
 
-        # Configure workers to attach to shared cache
-        def worker_init_fn(worker_id):
-            worker_dataset = cached_dataset
-            worker_dataset.attach_to_shared_cache(cache_name)
-    else:
-        # Use optimized memmap
-        print("Using optimized cache")
-        cached_dataset = OptimizedMemmapChessDataset(dataset.base_path)
-        worker_init_fn = None
+            # Configure workers to attach to shared cache
+            def worker_init_fn(worker_id):
+                worker_dataset = cached_dataset
+                worker_dataset.attach_to_shared_cache(cache_name)
+        elif not cache_type == "none" and not platform.system() == 'Windows':
+            # Use optimized memmap
+            print("Using optimized cache")
+            cached_dataset = OptimizedMemmapChessDataset(ds.base_path)
+        else:
+            cached_dataset = ds
+        cached_datasets.append(cached_dataset)
 
-    # Split dataset
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
-    )
+    if len(cached_datasets) == 1:
+        solo_ds = cached_datasets[0]
+        # Split dataset
+        train_size = int(0.8 * len(solo_ds))
+        val_size = len(solo_ds) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            solo_ds, [train_size, val_size]
+        )
+        cached_datasets = [val_dataset, train_dataset]
+
+    print(f"Using {len(cached_datasets)} training and val sets")
 
     is_windows = platform.system() == 'Windows'
 
@@ -158,30 +174,34 @@ def create_optimized_dataloaders(dataset, base_path, batch_size=TRAINING_CONFIG[
         meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
         worker_init_fn_win.length = int(meta['length'])
 
+    train_loaders = []
     # Optimized loader configuration
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=False,              # Disable shuffling for better cache locality
-        num_workers=TRAINING_CONFIG["num_workers"],              # Reduced workers to prevent memory pressure
-        pin_memory=False,           # Disable to reduce memory pressure
-        prefetch_factor=1,          # Minimal prefetch
-        persistent_workers=not is_windows,    # Reuse workers
-        worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
-    )
+    for cd in cached_datasets[1::]:
+        train_loaders.append(
+            DataLoader(
+                cd,
+                batch_size=batch_size,
+                shuffle=False,              # Disable shuffling for better cache locality
+                num_workers=TRAINING_CONFIG["num_workers"],              # Reduced workers to prevent memory pressure
+                pin_memory=True,           # Disable to reduce memory pressure
+                prefetch_factor=2,          # Minimal prefetch
+                persistent_workers= False, # because each epoch runs a different DS #not is_windows,    # Reuse workers
+                worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
+            )
+        )
 
     val_loader = DataLoader(
-        val_dataset,
+        cached_datasets[0],
         batch_size=batch_size * 2,  # Larger batch for validation
         shuffle=False,
         num_workers=TRAINING_CONFIG["num_workers"],
-        pin_memory=False,
-        prefetch_factor=1,
-        persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers= False, # because each epoch runs a different DS #not is_windows,
         worker_init_fn=worker_init_fn if cache_type == "shared" else worker_init_fn_win if is_windows else None
     )
 
-    return train_loader, val_loader, cached_dataset
+    return train_loaders, val_loader, cached_datasets
 
 
 def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
@@ -190,7 +210,7 @@ def load_pgn_games(pgn_file, max_games:int = 999999999) -> List[chess.pgn.Game]:
     with open(pgn_file, 'r', encoding='utf-8') as f:
         while len(games) < max_games:
             try:
-                if len(games) % 1000 == 0:
+                if len(games) % 10_000 == 0:
                     print(f"Loading game {len(games)}, remains {max_games - len(games)}")
                 game = chess.pgn.read_game(f)
                 if game is None:
@@ -215,11 +235,12 @@ def aggregate_pgn_games(directory, max_games):
     return all_games
 
 
-def build_ios(file, pos):
+def build_ios(file, pos, shape):
+    buffered_shape = shape + 10_000
     inputs_mmap = np.memmap(f'{file}_{pos}_inputs.dat', dtype=np.float32, mode='w+',
-                            shape=(estimated_positions_count, 19, 8, 8))
+                            shape=(buffered_shape, 19, 8, 8))
     outputs_mmap = np.memmap(f'{file}_{pos}_outputs.dat', dtype=np.float32, mode='w+',
-                             shape=(estimated_positions_count, 4096))
+                             shape=(buffered_shape, 4096))
     metadata = {
         'move_uci': [],
         'fen': [],
@@ -232,9 +253,9 @@ def build_ios(file, pos):
 if __name__ == "__main__":
     # Sample master game
     mmap_filename = "data/all_train_data_with_puzzles_v3"
-    max_games = 10_000_000
-    estimated_positions_count = 16_667_704 + 10 # used to allocate space
-    split = 5
+    max_games = 1_700_000
+    first_chunk_size = int(1024 * 1024 * 3.18) #first chunk is used as validation
+    next_chunk_size = int(1024 * 1024 * 3.18) #Overshoot a bit to avoid small batches
     current_split = 0
 
     fail_if_more_positions_available = True
@@ -246,41 +267,39 @@ if __name__ == "__main__":
     print("shuffled games")
     # Process the game
     generator = ChessTrainingDataGenerator()
-
-    inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split)
-
+    inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split, first_chunk_size)
+    chunk_size = first_chunk_size
     idx = 0
+    chunk_count = 0
     for i, game in enumerate(games):
-        if i % 100 == 0:
-            print(f"Processing game {i + 1}/{len(games)}")
+        if i % 100_000 == 0:
+            print(f"Processing game {i}/{len(games)} position {chunk_count} ({idx}) split {current_split}. Max per split: {chunk_size}")
         try:
             training_data = generator.process_pgn_string(game)
             for item in training_data:
-                if idx >= estimated_positions_count:
-                    if fail_if_more_positions_available:
-                        raise Exception(f"estimated {estimated_positions_count} but we actually have more examples")
-                    else:
-                        break
-                inputs_mmap[idx] = item['input']
-                outputs_mmap[idx] = item['output']
+                inputs_mmap[chunk_count] = item['input']
+                outputs_mmap[chunk_count] = item['output']
                 metadata['move_uci'].append(item['move_uci'])
                 metadata['fen'].append(item['fen'])
                 metadata['move_number'].append(item['move_number'])
                 idx += 1
-                if idx % 100_000 == 0:
-                    print(f"Flushing to mmap split {current_split} game {idx}")
+                chunk_count +=1
+                if chunk_count % 100_000 == 0:
+                    print(f"Flushing to mmap split {current_split} game {i} position {chunk_count}, global: {idx}")
                     inputs_mmap.flush()
                     outputs_mmap.flush()
+                if idx >= current_split * next_chunk_size + first_chunk_size:
+                    inputs_mmap.flush()
+                    outputs_mmap.flush()
+                    np.savez(f'{mmap_filename}_{current_split}_meta.npz', **metadata, length=chunk_count)
+                    current_split += 1
+                    chunk_count = 0
+                    chunk_size = next_chunk_size
+                    print(f"Generated split {current_split-1} of training in {mmap_filename}. Next position should be 0: {chunk_count} ==? {idx - first_chunk_size - (current_split - 1) * next_chunk_size}")
+                    inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split, next_chunk_size)
         except Exception as e:
             print(f"Error processing game {i}: {e}")
             continue
-        if i > (estimated_positions_count // split) * (current_split + 1):
-            current_split += 1
-            inputs_mmap.flush()
-            outputs_mmap.flush()
-            np.savez(f'{mmap_filename}_{current_split}_meta.npz', **metadata, length=idx)
-            print(f"Generated split {current_split} of training in {mmap_filename}")
-            inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split)
 
 
     # Optionally, trim arrays if you overestimated num_examples
@@ -288,9 +307,6 @@ if __name__ == "__main__":
     outputs_mmap.flush()
 
     # Save metadata and actual length
-    np.savez(f'{mmap_filename}_{current_split}_meta.npz', **metadata, length=idx)
+    np.savez(f'{mmap_filename}_{current_split}_meta.npz', **metadata, length=chunk_count)
     print(f"Generated {idx} training examples in {mmap_filename}")
-    del inputs_mmap
-    del outputs_mmap
-    gc.collect()
 
