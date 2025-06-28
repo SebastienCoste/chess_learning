@@ -18,6 +18,7 @@ import numpy as np
 from pl_bolts.utils.stability import UnderReviewWarning
 
 from cnn.chess.components.cnn.chess_cnn_v3 import EnhancedChessCNNV3
+from cnn.chess.components.cnn.chess_cnn_v4 import EnhancedChessCNNV4
 from cnn.chess.components.trainer import Trainer
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -59,7 +60,7 @@ def create_enhanced_chess_model_with_validation(config=TRAINING_CONFIG["config"]
     print("🔥 Compiling model with torch.compile...")
     is_windows = platform.system() == 'Windows'
     print(f"🔥 Compiling model with for windows? {is_windows}")
-    uncompiled_model = EnhancedChessCNNV3(**config).cuda()
+    uncompiled_model = EnhancedChessCNNV4(**config).cuda()
     if not is_windows:
         compiled_model = torch.compile(
             uncompiled_model,
@@ -129,13 +130,11 @@ def create_trainer(m, ds_root, trains, validate, data: list[Dataset]):
     return Trainer(
         model=m,
         dataset=data,
-        dataset_rootname = ds_root,
+        dataset_rootname=ds_root,
         train_loaders=trains,
         val_loader=validate,
         project_name=f"chess-cnn",
         experiment_name=f"run-{TRAINING_CONFIG["pth_file"]}-{TRAINING_CONFIG["version"]}",
-        learning_rate=TRAINING_CONFIG["learning_rate"],
-        weight_decay=TRAINING_CONFIG["weight_decay"],
         scheduler_type=TRAINING_CONFIG["scheduler_type"],
         early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
     )
