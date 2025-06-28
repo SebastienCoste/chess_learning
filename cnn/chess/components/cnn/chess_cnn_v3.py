@@ -7,7 +7,8 @@ from cnn.chess.components.cnn.modules.dense_block import DenseBlock, TransitionL
 from cnn.chess.components.cnn.modules.mish_activation import MishActivation
 from cnn.chess.components.cnn.modules.multi_scale_feature_extraction import MultiScaleConv
 from cnn.chess.components.cnn.modules.residual_block import SEResidualBlock
-from cnn.chess.components.cnn.modules.spatial_attention import SpatialAttention, SimplifiedSelfAttention
+from cnn.chess.components.cnn.modules.spatial_attention import SpatialAttention, SimplifiedSelfAttention, \
+    SpatialChannelAttention
 from cnn.chess.components.cnn.modules.positional_encoding import PositionalEncoding2D
 from cnn.chess.components.cnn.modules.stochastic_depth import StochasticDepth
 
@@ -71,6 +72,7 @@ class EnhancedChessCNNV3(nn.Module):
 
         # Spatial attention
         self.spatial_attn = SpatialAttention()
+        self.spatial_channel_attn = SpatialChannelAttention(in_channels, self.activation_fn)
 
         # Simplified self-attention
         self.self_attn = SimplifiedSelfAttention(embed_dim=96, num_heads=transformer_heads) #or embed_dim = 128 ?
