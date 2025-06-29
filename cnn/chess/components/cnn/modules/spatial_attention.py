@@ -53,7 +53,7 @@ class SpatialChannelAttention(nn.Module):
     Generates attention weights for each spatial location.
     """
 
-    def __init__(self, in_channels, reduction_ratio=8):
+    def __init__(self, in_channels, activation_fn, reduction_ratio=8):
         super(SpatialChannelAttention, self).__init__()
 
         self.avg_pool = nn.AdaptiveAvgPool2d(1)

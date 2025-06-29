@@ -8,6 +8,8 @@ import torch.optim as optim
 from torch.utils.data import Dataset
 from pl_bolts.utils.stability import UnderReviewWarning
 
+from cnn.chess.components.training.stabilized_cosine import StabilizedCosineAnnealingWarmRestarts
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UnderReviewWarning)
 if not hasattr(np, 'bool'):
@@ -141,6 +143,13 @@ class Trainer:
             self.scheduler = SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], [TRAINING_CONFIG["cosine"]["warmup_epochs"]])
         elif scheduler_type == 'cosine_annealing_warm_restarts':
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=TRAINING_CONFIG["cosine"]["first_restart"],  # First restart after 10 epochs
+                T_mult=2,  # Double the cycle length after each restart
+                eta_min=TRAINING_CONFIG["cosine"]["eta_min"]  # Minimum learning rate (adjust as needed)
+            )
+        elif scheduler_type == 'stabilized_cosine_annealing_warm_restarts':
+            self.scheduler = StabilizedCosineAnnealingWarmRestarts(
                 self.optimizer,
                 T_0=TRAINING_CONFIG["cosine"]["first_restart"],  # First restart after 10 epochs
                 T_mult=2,  # Double the cycle length after each restart
@@ -306,7 +315,6 @@ class Trainer:
                 num_updates += 1
 
             total_loss += loss.item() * self.accumulation_steps
-            # Minimal logging (every 100 batches)
             batch_time = time.time() - batch_start_time
             if batch_idx % 100 == 0:
                 throughput = (batch_idx + 1) * TRAINING_CONFIG["batch_size"] / (time.time() - start_time)
@@ -385,7 +393,7 @@ class Trainer:
             # Training
             start = time.time()
             train_loss = self.train_epoch(epoch)
-            self._cleanup_epoch(epoch)
+            self._cleanup_epoch(epoch % len(self.train_loaders))
             # Validation
             if epoch % len(self.train_loaders) == len(self.train_loaders) - 1:
                 val_loss = self.validate()
@@ -411,7 +419,7 @@ class Trainer:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     # Save model checkpoint
-                    checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}.pth"
+                    checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}_{val_loss:2f}.pth"
                     torch.save({
                         'epoch': epoch,
                         'model_state_dict': self.model.state_dict(),

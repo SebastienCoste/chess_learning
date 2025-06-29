@@ -9,10 +9,10 @@ TRAINING_CONFIG = {
     "board_size": 8,
     "batch_size": 512,  # To be adjusted. 128 is way too small5
     "num_workers": 10, #8 cores, 16 virtual workers
-    "version": "v6.0",
+    "version": "CNN5.2_v7.2",
     "learning_rate": 0.0003,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
-    "scheduler_type": 'cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
+    "scheduler_type": 'stabilized_cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
     "early_stopping_patience": 5,
     "mixed_precision": True,
     "with_ema": False,
@@ -32,8 +32,8 @@ TRAINING_CONFIG = {
             'transformer_heads': 4,
         },
     "cosine": {
-        "warmup_epochs": 3, #or 10 ? # Ramp up learning rate gradually
-        "first_restart": 5, #or 10 ? # Ramp up learning rate gradually
+        "warmup_epochs": 5, #or 10 ? # Ramp up learning rate gradually
+        "first_restart": 10, #or 10 ? # Ramp up learning rate gradually
         "min_lr": 1e-6,
         "eta_min": 1e-6 ,     # Minimum LR for cosine annealing
     },
