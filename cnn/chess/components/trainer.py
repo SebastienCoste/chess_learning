@@ -5,7 +5,7 @@ import warnings
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from pl_bolts.utils.stability import UnderReviewWarning
 
 from cnn.chess.components.training.stabilized_cosine import StabilizedCosineAnnealingWarmRestarts
@@ -47,8 +47,8 @@ class Trainer:
             self,
             model: nn.Module,
             dataset: list[Dataset],
-            train_loaders,
-            val_loader,
+            train_loaders: list[DataLoader],
+            val_loader: DataLoader,
             dataset_rootname: str,
             project_name: str = "chess-cnn",
             experiment_name: str = None,
@@ -217,31 +217,13 @@ class Trainer:
     def validate_model_setup(self):
         ModelValidator().validate_all(self.model)
 
-    def _cleanup_epoch(self, cycle):
+    def _cleanup_dataset(self, dataset, seed=None):
         """Release resources after each epoch"""
-        if hasattr(self.train_loaders[cycle], 'clear_cache'):
-            self.train_loaders[cycle].clear_cache()
+        if hasattr(dataset, 'clear_cache'):
+            dataset.clear_cache(seed)
         import gc
         gc.collect()
         torch.cuda.empty_cache()
-        if hasattr(self.train_loaders[cycle], '_inputs'):
-            os.close(self.train_loaders[cycle]._inputs)
-        if hasattr(self.train_loaders[cycle], '_outputs'):
-            os.close(self.train_loaders[cycle]._outputs)
-        if not platform.system() == 'Windows':
-            self._release_linux_resources()
-
-    def _cleanup_validation(self):
-        """Release resources after each epoch"""
-        if hasattr(self.val_loader, 'clear_cache'):
-            self.val_loader.clear_cache()
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache()
-        if hasattr(self.val_loader, '_inputs'):
-            os.close(self.val_loader._inputs)
-        if hasattr(self.val_loader, '_outputs'):
-            os.close(self.val_loader._outputs)
         if not platform.system() == 'Windows':
             self._release_linux_resources()
 
@@ -393,11 +375,11 @@ class Trainer:
             # Training
             start = time.time()
             train_loss = self.train_epoch(epoch)
-            self._cleanup_epoch(epoch % len(self.train_loaders))
+            self._cleanup_dataset(self.train_loaders[epoch % len(self.train_loaders)].dataset)
             # Validation
             if epoch % len(self.train_loaders) == len(self.train_loaders) - 1:
                 val_loss = self.validate()
-                self._cleanup_validation()
+                self._cleanup_dataset(self.val_loader.dataset)
 
                 # Record metrics
                 self.train_losses.append(train_loss)

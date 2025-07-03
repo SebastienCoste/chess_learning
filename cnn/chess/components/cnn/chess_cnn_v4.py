@@ -20,6 +20,7 @@ def get_activation_function(activation_name='gelu'):
         'gelu': lambda: nn.GELU(),
         'mish': lambda: MishActivation(inplace=True),
         'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
+        'sigmoid': lambda: nn.Sigmoid(),  # SiLU is equivalent to Swish
     }
     return activations.get(activation_name.lower(), lambda: nn.GELU())
 

@@ -9,10 +9,10 @@ TRAINING_CONFIG = {
     "board_size": 8,
     "batch_size": 512,  # To be adjusted. 128 is way too small5
     "num_workers": 10, #8 cores, 16 virtual workers
-    "version": "CNN5.2_v7.2",
+    "version": "CNN5.3_Trainer8.1_sigmoid",
     "learning_rate": 0.0003,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
-    "scheduler_type": 'stabilized_cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
+    "scheduler_type": 'stabilized_cosine_annealing_warm_restarts',#'stabilized_cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
     "early_stopping_patience": 5,
     "mixed_precision": True,
     "with_ema": False,
@@ -28,12 +28,12 @@ TRAINING_CONFIG = {
             'fc_layers': [512, 256],
             'dropout_rate': 0.5, #increased from 0.3
             'batch_norm': True,
-            'activation': 'relu',
+            'activation': 'gelu', #mish < relu < gelu. mish is slow and non performant Sigmoid starts worse but improes faster
             'transformer_heads': 4,
         },
     "cosine": {
         "warmup_epochs": 5, #or 10 ? # Ramp up learning rate gradually
-        "first_restart": 10, #or 10 ? # Ramp up learning rate gradually
+        "first_restart": 100, #no restart
         "min_lr": 1e-6,
         "eta_min": 1e-6 ,     # Minimum LR for cosine annealing
     },

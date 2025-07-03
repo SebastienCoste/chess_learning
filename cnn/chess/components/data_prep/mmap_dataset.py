@@ -36,12 +36,19 @@ def convert_pickle_to_memmap(pickle_file, output_base):
 
 
 class MemmapChessDataset(Dataset):
-    def __init__(self, base_path):
+    def __init__(self, base_path, shuffle_seed=None):
         self.base_path = base_path
         # Store metadata but don't open files yet
         meta = np.load(f"{base_path}_meta.npz", allow_pickle=True)
         self.length = int(meta['length'])
         self.metadata = meta
+
+
+        # Create shuffled indices in memory (fast)
+        self.indices = np.arange(self.length)
+        if shuffle_seed is not None:
+            np.random.seed(shuffle_seed)
+        np.random.shuffle(self.indices)
 
         # Don't store file handles - these will be opened per-worker
         self._inputs = None
@@ -59,12 +66,25 @@ class MemmapChessDataset(Dataset):
 
     def __getitem__(self, idx):
         self._ensure_loaded()  # Open files if not already open
-        input_tensor = torch.from_numpy(self._inputs[idx].copy())
-        output_tensor = torch.from_numpy(self._outputs[idx].copy())
+        actual_idx = self.indices[idx]
+        input_tensor = torch.from_numpy(self._inputs[actual_idx].copy())
+        output_tensor = torch.from_numpy(self._outputs[actual_idx].copy())
         return input_tensor, output_tensor
 
     def __len__(self):
         return self.length
+
+    def reshuffle(self, seed=None):
+        if seed is not None:
+            np.random.seed(seed)
+        np.random.shuffle(self.indices)
+
+    def clear_cache(self, seed=None):
+        self.reshuffle(seed)
+        if not self._inputs is None:
+            os.close(self._inputs)
+        if not self._outputs is None:
+            os.close(self._outputs)
 
 
 # Global dictionary for process-specific arrays

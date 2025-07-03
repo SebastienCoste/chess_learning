@@ -4,6 +4,7 @@ import numpy as np
 from typing import Optional
 
 from cnn.chess.components.cnn.chess_cnn_v3 import EnhancedChessCNNV3
+from cnn.chess.components.cnn.chess_cnn_v5 import EnhancedChessCNNV5
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
 from cnn.chess.old.chess_cnn import EnhancedChessCNN
 from cnn.chess.old.chess_cnn_v2 import EnhancedChessCNNV2
@@ -27,6 +28,8 @@ class SimpleChessEngine:
                     self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
                 elif version == 3:
                     self.model = EnhancedChessCNNV3(**TRAINING_CONFIG["config"])
+                elif version == 5:
+                    self.model = EnhancedChessCNNV5(**TRAINING_CONFIG["config"])
                 else:
                     raise ValueError("Invalid version")
 
@@ -35,11 +38,20 @@ class SimpleChessEngine:
 
                 # Handle different checkpoint formats
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    state_dict = checkpoint['model_state_dict']
                     print(f"Loaded model from epoch {checkpoint.get('epoch', 'unknown')}")
                 else:
-                    self.model.load_state_dict(checkpoint)
+                    state_dict = checkpoint
+                # FIX: Handle compiled model state_dict with '_orig_mod.' prefix
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith('_orig_mod.'):
+                        new_key = key[10:]  # Remove '_orig_mod.' prefix (10 characters)
+                        new_state_dict[new_key] = value
+                    else:
+                        new_state_dict[key] = value
 
+                self.model.load_state_dict(new_state_dict)
                 self.model.to(self.device)
                 self.model.eval()
                 print(f"Model successfully loaded on {self.device}")
@@ -83,7 +95,7 @@ class SimpleChessEngine:
             x = board_to_tensor(board)
             with torch.no_grad():
                 logits = self.model(x)
-                probabilities = torch.softmax(logits, dim=1)
+                probabilities = logits # torch.softmax(logits, dim=1)
 
             # Get top-k predictions
             top_k_values, top_k_indices = torch.topk(probabilities, k, dim=1)
@@ -137,6 +149,9 @@ class SimpleChessEngine:
                 if move and move in board.legal_moves:
                     print(f"AI (model) selects: {board.san(move)} (confidence: {prob:.3f})")
                     return move
+                else:
+                    print(f"AI (model) selects: {move} (confidence: {prob:.3f}) Illegal move")
+
 
             # If no top-10 moves are legal, fall back to random legal move
             print("AI model's top predictions were illegal, selecting random legal move.")

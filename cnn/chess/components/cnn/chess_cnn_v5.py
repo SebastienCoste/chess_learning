@@ -21,6 +21,7 @@ def get_activation_function(activation_name='gelu'):
         'gelu': lambda: nn.GELU(),
         'mish': lambda: MishActivation(inplace=True),
         'swish': lambda: nn.SiLU(),  # SiLU is equivalent to Swish
+        'sigmoid': lambda: nn.Sigmoid(),  # SiLU is equivalent to Swish
     }
     return activations.get(activation_name.lower(), lambda: nn.GELU())
 
@@ -63,7 +64,8 @@ class EnhancedChessCNNV5(nn.Module):
 
         # Positional encoding
         self.pos_encoding = PositionalEncoding2D(input_channels, board_size, board_size)
-        self.channel_attention = SpatialChannelAttention(self.input_channels, activation_fn)
+        # Adds a loss to all steps
+        # self.channel_attention = SpatialChannelAttention(self.input_channels, activation_fn)
         # Initial convolution
         self.initial_conv = MultiScaleConv(input_channels, 64, activation_fn)
         self.spatial_dropout1 = nn.Dropout2d(p=0.3)  # Spatial dropout for conv layers
@@ -124,7 +126,7 @@ class EnhancedChessCNNV5(nn.Module):
         """Forward pass through feature extraction"""
         # Stage 1: Early attention on raw input
         x = self.pos_encoding(x)
-        x = self.channel_attention(x)
+        # x = self.channel_attention(x)
         x = self.multi_attention(x, stage=0)  # ATTENTION LAYER 1
 
         # Stage 2: After initial convolution
