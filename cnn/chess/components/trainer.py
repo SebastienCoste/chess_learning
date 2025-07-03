@@ -5,8 +5,10 @@ import warnings
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from pl_bolts.utils.stability import UnderReviewWarning
+
+from cnn.chess.components.training.stabilized_cosine import StabilizedCosineAnnealingWarmRestarts
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UnderReviewWarning)
@@ -45,13 +47,11 @@ class Trainer:
             self,
             model: nn.Module,
             dataset: list[Dataset],
-            train_loaders,
-            val_loader,
+            train_loaders: list[DataLoader],
+            val_loader: DataLoader,
             dataset_rootname: str,
             project_name: str = "chess-cnn",
             experiment_name: str = None,
-            learning_rate: float = 0.001,
-            weight_decay: float = 1e-4,
             scheduler_type: str = 'reduce_on_plateau',
             early_stopping_patience: int = 10
     ):
@@ -89,15 +89,30 @@ class Trainer:
         if TRAINING_CONFIG["with_ema"]:
             self.ema = EMA(model, decay=0.999)
 
+        attention_params = []
+        other_params = []
+
+        for name, param in model.named_parameters():
+            if 'attention' in name:
+                attention_params.append(param)
+            else:
+                other_params.append(param)
+
+        self.optimizer  = torch.optim.AdamW([
+            {'params': attention_params, 'lr': TRAINING_CONFIG["learning_rate"], 'weight_decay': TRAINING_CONFIG["attention"]["weight_decay"]},
+            {'params': other_params, 'lr': TRAINING_CONFIG["attention"]["learning_rate"], 'weight_decay': TRAINING_CONFIG["weight_decay"]},
+        ])
+
+
         # Optimizer with weight decay (L2 regularization)
-        self.optimizer = optim.AdamW(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            fused=True  # PyTorch 2.0+ fused optimizer
-        )
+        # self.optimizer = optim.AdamW(
+        #     model.parameters(),
+        #     lr=TRAINING_CONFIG["learning_rate"],
+        #     weight_decay=TRAINING_CONFIG["weight_decay"],
+        #     betas=(0.9, 0.999),
+        #     eps=1e-8,
+        #     fused=True  # PyTorch 2.0+ fused optimizer
+        # )
 
         self.scaler = GradScaler() #For AMP
         self.criterion = nn.CrossEntropyLoss()  # Simple, fast loss
@@ -128,6 +143,13 @@ class Trainer:
             self.scheduler = SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], [TRAINING_CONFIG["cosine"]["warmup_epochs"]])
         elif scheduler_type == 'cosine_annealing_warm_restarts':
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=TRAINING_CONFIG["cosine"]["first_restart"],  # First restart after 10 epochs
+                T_mult=2,  # Double the cycle length after each restart
+                eta_min=TRAINING_CONFIG["cosine"]["eta_min"]  # Minimum learning rate (adjust as needed)
+            )
+        elif scheduler_type == 'stabilized_cosine_annealing_warm_restarts':
+            self.scheduler = StabilizedCosineAnnealingWarmRestarts(
                 self.optimizer,
                 T_0=TRAINING_CONFIG["cosine"]["first_restart"],  # First restart after 10 epochs
                 T_mult=2,  # Double the cycle length after each restart
@@ -195,31 +217,13 @@ class Trainer:
     def validate_model_setup(self):
         ModelValidator().validate_all(self.model)
 
-    def _cleanup_epoch(self, cycle):
+    def _cleanup_dataset(self, dataset, seed=None):
         """Release resources after each epoch"""
-        if hasattr(self.train_loaders[cycle], 'clear_cache'):
-            self.train_loaders[cycle].clear_cache()
+        if hasattr(dataset, 'clear_cache'):
+            dataset.clear_cache(seed)
         import gc
         gc.collect()
         torch.cuda.empty_cache()
-        if hasattr(self.train_loaders[cycle], '_inputs'):
-            os.close(self.train_loaders[cycle]._inputs)
-        if hasattr(self.train_loaders[cycle], '_outputs'):
-            os.close(self.train_loaders[cycle]._outputs)
-        if not platform.system() == 'Windows':
-            self._release_linux_resources()
-
-    def _cleanup_validation(self):
-        """Release resources after each epoch"""
-        if hasattr(self.val_loader, 'clear_cache'):
-            self.val_loader.clear_cache()
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache()
-        if hasattr(self.val_loader, '_inputs'):
-            os.close(self.val_loader._inputs)
-        if hasattr(self.val_loader, '_outputs'):
-            os.close(self.val_loader._outputs)
         if not platform.system() == 'Windows':
             self._release_linux_resources()
 
@@ -293,7 +297,6 @@ class Trainer:
                 num_updates += 1
 
             total_loss += loss.item() * self.accumulation_steps
-            # Minimal logging (every 100 batches)
             batch_time = time.time() - batch_start_time
             if batch_idx % 100 == 0:
                 throughput = (batch_idx + 1) * TRAINING_CONFIG["batch_size"] / (time.time() - start_time)
@@ -372,11 +375,11 @@ class Trainer:
             # Training
             start = time.time()
             train_loss = self.train_epoch(epoch)
-            self._cleanup_epoch(epoch)
+            self._cleanup_dataset(self.train_loaders[epoch % len(self.train_loaders)].dataset)
             # Validation
             if epoch % len(self.train_loaders) == len(self.train_loaders) - 1:
                 val_loss = self.validate()
-                self._cleanup_validation()
+                self._cleanup_dataset(self.val_loader.dataset)
 
                 # Record metrics
                 self.train_losses.append(train_loss)
@@ -398,7 +401,7 @@ class Trainer:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     # Save model checkpoint
-                    checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}.pth"
+                    checkpoint_path = f"models/{TRAINING_CONFIG["pth_file"]}_{TRAINING_CONFIG["version"]}_cp{epoch}_{val_loss:2f}.pth"
                     torch.save({
                         'epoch': epoch,
                         'model_state_dict': self.model.state_dict(),

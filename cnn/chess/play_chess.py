@@ -151,13 +151,13 @@ def main():
         model_path = input("Enter the path to your model file (e.g. chessMVLv3.pth): ").strip()
         if not model_path:
             print("No model specified. Using models/chess_gm_puzzle_v4.1_cp1.pth.")
-            model_path = "./models/chess_gm_puzzle_v4.1_cp1.pth"
+            model_path = "./models/chess_gm_puzzle_CNN5.3_v8_sigmoid_final.pth"
 
     
     # Initialize components
     board = chess.Board()
     display = EnhancedChessDisplay()
-    engine = SimpleChessEngine(model_path, version=2)
+    engine = SimpleChessEngine(model_path, version=5)
     
     player_color = chess.WHITE if args.color == "white" else chess.BLACK
     
@@ -166,7 +166,7 @@ def main():
     print("Commands: Type moves like 'e4', 'Nf3', or 'quit' to exit")
     move_count = 0
     # Game loop
-    opening = [] #["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
+    opening = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "Nc3", "Be7"]
     while not board.is_game_over():
         if move_count < len(opening):
             move = board.parse_san(opening[move_count])
