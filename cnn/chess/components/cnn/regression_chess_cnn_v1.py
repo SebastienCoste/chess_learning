@@ -156,7 +156,7 @@ class RegressionChessCNNv1(nn.Module):
         x = self.flatten(x)
         x = self.fc(x)
         # Apply sigmoid to bound output between 0 and 1 for probabilities
-        x = torch.sigmoid(x)  # This ensures outputs are valid probabilities
+        # x = torch.sigmoid(x)  #remiving because it causes varnishing gradients
         #Alt: x = F.softmax(x.view(x.size(0), -1), dim=1) for a real probability, but actually we're fine with sum > 1: Several real good move, then several legal move, then avoid illegal moves
         return x
 

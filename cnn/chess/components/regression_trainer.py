@@ -84,7 +84,6 @@ class RegressionTrainer:
 
         # Log model architecture to W&B
         wandb.watch(self.model, log_freq=100, log="all")
-        self.scaler = GradScaler()  # Add this line for AMP
 
         if TRAINING_CONFIG["with_ema"]:
             self.ema = EMA(model, decay=0.999)
@@ -114,7 +113,7 @@ class RegressionTrainer:
         #     fused=True  # PyTorch 2.0+ fused optimizer
         # )
 
-        self.scaler = GradScaler() #For AMP
+        self.scaler = GradScaler(enabled=TRAINING_CONFIG["mixed_precision"]) #For AMP
         if TRAINING_CONFIG["criterion"] == "smooth":
             self.criterion =  nn.SmoothL1Loss() # alt: nn.MSELoss()  or nn.L1Loss() for MAE
         elif TRAINING_CONFIG["criterion"] == "mse":
@@ -267,7 +266,7 @@ class RegressionTrainer:
             if TRAINING_CONFIG["with_mixup"]:
                 data, targets_a, targets_b, lam = mixup_data(data, target, alpha=0.1)
             # Forward pass with AMP
-            with autocast(device_type='cuda', dtype=torch.float16):
+            with autocast(device_type='cuda', dtype=torch.float16, enabled=TRAINING_CONFIG["mixed_precision"]):
                 output = self.model(data)
                 # More precise? More complex
                 if TRAINING_CONFIG["with_mixup"]:
@@ -307,13 +306,13 @@ class RegressionTrainer:
                 if hasattr(self.dataset[cycle + 1], 'get_cache_stats'):
                     stats = self.dataset[cycle + 1].get_cache_stats()
                     print(
-                        f"Batch {batch_idx:5d} | Loss: {loss.item():.4f} | "
+                        f"Batch {batch_idx:5d} | Loss: {loss.item()} | "
                         f"Throughput: {throughput:.2f} samples/sec | "
                         f"Cache hit rate: {stats['hit_rate']:.2%} | "
                         f"Cache utilization: {stats['cache_size']}/{stats['capacity']} | "
                     )
                 else:
-                    print(f"Batch {batch_idx:5d} | Loss: {loss.item() * self.accumulation_steps:.4f} | "
+                    print(f"Batch {batch_idx:5d} | Loss: {loss.item() * self.accumulation_steps} | "
                         f"Throughput: {throughput:.2f} samples/sec")
 
                 self.batch_logger.log_batch_metrics(
@@ -345,8 +344,8 @@ class RegressionTrainer:
         with torch.no_grad():
             for data, target in self.val_loader:
                 data = data.cuda(non_blocking=True)
-                target = target.cuda(non_blocking=True).argmax(dim=1)
-                with autocast(device_type='cuda', dtype=torch.float16):
+                target = target.cuda(non_blocking=True).float()
+                with autocast(device_type='cuda', dtype=torch.float16, enabled=TRAINING_CONFIG["mixed_precision"]):
                     if TRAINING_CONFIG["criterion"] == "KLDiv":
                         output = torch.log(self.model(data))  # Log probabilities for KLDivLoss
                     else:
@@ -432,8 +431,8 @@ class RegressionTrainer:
 
 
                 print(f"📊 Epoch {epoch:3d}/{num_epochs}")
-                print(f"   • Train Loss: {train_loss:.6f}")
-                print(f"   • Val Loss:   {val_loss:.6f}")
+                print(f"   • Train Loss: {train_loss}")
+                print(f"   • Val Loss:   {val_loss}")
                 print(f"   • LR:         {current_lr:.2e}")
                 print(f"   • Duration:   {time.time() - start:.2f} seconds")
                 print("-" * 40)

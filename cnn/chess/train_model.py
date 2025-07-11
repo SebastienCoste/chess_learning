@@ -162,7 +162,7 @@ if __name__ == "__main__":
 
     # Apply system optimizations
     optimize_system_settings()
-    train_type = "all_train_data_with_puzzles_v3"
+    train_type = "all_train_data_with_puzzles__regv4"
     mmap_file = f'data/{train_type}'
     split = 5
 

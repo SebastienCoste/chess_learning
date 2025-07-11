@@ -11,6 +11,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.amp import autocast, GradScaler
 import os
 
+from cnn.chess.components.config import TRAINING_CONFIG
+
+
 # System-level optimizations
 def optimize_system_settings():
     """Apply system-level optimizations for RTX 5080 + 128GB RAM"""
@@ -182,7 +185,7 @@ class OptimizedTrainer:
             target = target.cuda(non_blocking=True).argmax(dim=1)  # Convert one-hot
             
             # Forward pass with AMP
-            with autocast(device_type='cuda', dtype=torch.float16):
+            with autocast(device_type='cuda', dtype=torch.float16, enabled=TRAINING_CONFIG["mixed_precision"]):
                 output = self.model(data)
                 loss = self.criterion(output, target) / self.accumulation_steps
             
@@ -229,7 +232,7 @@ class OptimizedTrainer:
                 data = data.cuda(non_blocking=True)
                 target = target.cuda(non_blocking=True).argmax(dim=1)
                 
-                with autocast(device_type='cuda', dtype=torch.float16):
+                with autocast(device_type='cuda', dtype=torch.float16, enabled=TRAINING_CONFIG["mixed_precision"]):
                     output = self.model(data)
                     loss = self.criterion(output, target)
                 
