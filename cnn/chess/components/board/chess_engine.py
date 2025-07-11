@@ -4,7 +4,8 @@ import numpy as np
 from typing import Optional
 
 from cnn.chess.old.chess_cnn_v3 import EnhancedChessCNNV3
-from cnn.chess.components.cnn.chess_cnn_v5 import EnhancedChessCNNV5
+from cnn.chess.components.cnn.classification_chess_cnn_v5 import ClassificationChessCNNv5
+from cnn.chess.components.cnn.regression_chess_cnn_v1 import RegressionChessCNNv1
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
 from cnn.chess.old.chess_cnn import EnhancedChessCNN
 from cnn.chess.old.chess_cnn_v2 import EnhancedChessCNNV2
@@ -12,8 +13,9 @@ from cnn.chess.components.config import TRAINING_CONFIG
 
 
 class SimpleChessEngine:
-    def __init__(self, model_path=None, version = 2):
+    def __init__(self, model_path=None, version = 2, prepare_for_regression: bool = False):
         self.model_path = model_path
+        self.prepare_for_regression = prepare_for_regression
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if model_path:
@@ -25,11 +27,14 @@ class SimpleChessEngine:
                 if version == 2:
                     self.model = (EnhancedChessCNNV2(**TRAINING_CONFIG["config"]))
                 elif version == 1:
-                    self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
+                    if self.prepare_for_regression:
+                        self.model = RegressionChessCNNv1(**TRAINING_CONFIG["config"])
+                    else:
+                        self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
                 elif version == 3:
                     self.model = EnhancedChessCNNV3(**TRAINING_CONFIG["config"])
                 elif version == 5:
-                    self.model = EnhancedChessCNNV5(**TRAINING_CONFIG["config"])
+                    self.model = ClassificationChessCNNv5(**TRAINING_CONFIG["config"])
                 else:
                     raise ValueError("Invalid version")
 
@@ -135,8 +140,11 @@ class SimpleChessEngine:
             elif len(x.shape) == 3:  # If it's [channels, height, width]
                 x = x.unsqueeze(0)  # Make it [1, channels, height, width]
             with torch.no_grad():
-                logits = self.model(x)
-                probabilities = torch.softmax(logits, dim=1)
+                if self.prepare_for_regression:
+                    probabilities = self.model(x)  # Already probabilities from sigmoid
+                else:
+                    logits = self.model(x)
+                    probabilities = torch.softmax(logits, dim=1)
 
             # Try top moves until we find a legal one
             top_k_values, top_k_indices = torch.topk(probabilities, 10, dim=1)

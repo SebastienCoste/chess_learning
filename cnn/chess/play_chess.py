@@ -157,7 +157,7 @@ def main():
     # Initialize components
     board = chess.Board()
     display = EnhancedChessDisplay()
-    engine = SimpleChessEngine(model_path, version=5)
+    engine = SimpleChessEngine(model_path, version=1, prepare_for_regression=True)
     
     player_color = chess.WHITE if args.color == "white" else chess.BLACK
     

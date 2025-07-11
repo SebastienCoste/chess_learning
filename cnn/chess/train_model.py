@@ -17,8 +17,10 @@ import warnings
 import numpy as np
 from pl_bolts.utils.stability import UnderReviewWarning
 
-from cnn.chess.components.cnn.chess_cnn_v5 import EnhancedChessCNNV5
-from cnn.chess.components.trainer import Trainer
+from cnn.chess.components.cnn.classification_chess_cnn_v5 import ClassificationChessCNNv5
+from cnn.chess.components.classification_trainer import ClassificationTrainer
+from cnn.chess.components.cnn.regression_chess_cnn_v1 import RegressionChessCNNv1
+from cnn.chess.components.regression_trainer import RegressionTrainer
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UnderReviewWarning)
@@ -59,7 +61,10 @@ def create_enhanced_chess_model_with_validation(config=TRAINING_CONFIG["config"]
     print("🔥 Compiling model with torch.compile...")
     is_windows = platform.system() == 'Windows'
     print(f"🔥 Compiling model with for windows? {is_windows}")
-    uncompiled_model = EnhancedChessCNNV5(**config).cuda()
+    if TRAINING_CONFIG["is_regression"]:
+        uncompiled_model = RegressionChessCNNv1(**config).cuda()
+    else:
+        uncompiled_model = ClassificationChessCNNv5(**config).cuda()
     if not is_windows:
         compiled_model = torch.compile(
             uncompiled_model,
@@ -125,15 +130,28 @@ def optimize_system_settings():
     print("✓ System optimizations applied")
 
 
-def create_trainer(m, ds_root, trains, validate, data: list[Dataset]):
-    return Trainer(
+def create_classification_trainer(m, ds_root, trains, validate, data: list[Dataset]):
+    return ClassificationTrainer(
         model=m,
         dataset=data,
         dataset_rootname=ds_root,
         train_loaders=trains,
         val_loader=validate,
         project_name=f"chess-cnn",
-        experiment_name=f"run-{TRAINING_CONFIG["pth_file"]}-{TRAINING_CONFIG["version"]}",
+        experiment_name=f"run-classif-{TRAINING_CONFIG["pth_file"]}-{TRAINING_CONFIG["version"]}",
+        scheduler_type=TRAINING_CONFIG["scheduler_type"],
+        early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
+    )
+
+def create_regression_trainer(m, ds_root, trains, validate, data: list[Dataset]):
+    return RegressionTrainer(
+        model=m,
+        dataset=data,
+        dataset_rootname=ds_root,
+        train_loaders=trains,
+        val_loader=validate,
+        project_name=f"chess-cnn",
+        experiment_name=f"run-regress-{TRAINING_CONFIG["pth_file"]}-{TRAINING_CONFIG["version"]}",
         scheduler_type=TRAINING_CONFIG["scheduler_type"],
         early_stopping_patience=TRAINING_CONFIG["early_stopping_patience"]
     )
@@ -168,11 +186,18 @@ if __name__ == "__main__":
 
     print(f"train_loaders has {len(train_loaders)} datasets")
     # Initialize trainer with W&B integration
-    trainer = create_trainer(model, mmap_file, train_loaders, val_loader, cached_datasets)
+    if TRAINING_CONFIG["is_regression"]:
+        trainer = create_regression_trainer(model, mmap_file, train_loaders, val_loader, cached_datasets)
+    else:
+        trainer = create_classification_trainer(model, mmap_file, train_loaders, val_loader, cached_datasets)
     print(f"Model should be on CUDA: {next(model.parameters()).device}")
 
     # Print comprehensive model summary
-    create_trainer(uncompiled_model, mmap_file, train_loaders, val_loader, cached_datasets).print_model_summary()
+
+    if TRAINING_CONFIG["is_regression"]:
+        create_regression_trainer(uncompiled_model, mmap_file, train_loaders, val_loader, cached_datasets).print_model_summary()
+    else:
+        create_classification_trainer(uncompiled_model, mmap_file, train_loaders, val_loader, cached_datasets).print_model_summary()
 
     # Validate model setup
     trainer.validate_model_setup()

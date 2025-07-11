@@ -9,7 +9,7 @@ TRAINING_CONFIG = {
     "board_size": 8,
     "batch_size": 512,  # To be adjusted. 128 is way too small5
     "num_workers": 10, #8 cores, 16 virtual workers
-    "version": "CNN5.3_Trainer8.1_sigmoid",
+    "version": "CNN6.0_TrainerReg1.0_Smooth",
     "learning_rate": 0.0003,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
     "scheduler_type": 'stabilized_cosine_annealing_warm_restarts',#'stabilized_cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
@@ -21,6 +21,8 @@ TRAINING_CONFIG = {
     'accumulation_steps': 4,
     "pth_file": "chess_gm_puzzle",
     "cache_type": "none", # lru or shared
+    "criterion": "smooth",
+    "is_regression": True,
     "config": {
             'input_channels': INPUT_CHANNEL,
             'board_size': 8,
