@@ -3,12 +3,12 @@ import chess
 import numpy as np
 from typing import Optional
 
-from cnn.chess.old.chess_cnn_v3 import EnhancedChessCNNV3
-from cnn.chess.components.cnn.classification_chess_cnn_v5 import ClassificationChessCNNv5
+from cnn.old.chess_cnn_v3 import EnhancedChessCNNV3
+from cnn.old.classification.classification_chess_cnn_v5 import ClassificationChessCNNv5
 from cnn.chess.components.cnn.regression_chess_cnn_v1 import RegressionChessCNNv1
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
-from cnn.chess.old.chess_cnn import EnhancedChessCNN
-from cnn.chess.old.chess_cnn_v2 import EnhancedChessCNNV2
+from cnn.old.chess_cnn import EnhancedChessCNN
+from cnn.old.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess.components.config import TRAINING_CONFIG
 
 

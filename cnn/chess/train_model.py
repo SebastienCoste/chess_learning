@@ -17,8 +17,8 @@ import warnings
 import numpy as np
 from pl_bolts.utils.stability import UnderReviewWarning
 
-from cnn.chess.components.cnn.classification_chess_cnn_v5 import ClassificationChessCNNv5
-from cnn.chess.components.classification_trainer import ClassificationTrainer
+from cnn.old.classification.classification_chess_cnn_v5 import ClassificationChessCNNv5
+from cnn.old.classification.classification_trainer import ClassificationTrainer
 from cnn.chess.components.cnn.regression_chess_cnn_v1 import RegressionChessCNNv1
 from cnn.chess.components.regression_trainer import RegressionTrainer
 
