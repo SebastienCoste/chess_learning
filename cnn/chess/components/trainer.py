@@ -115,7 +115,10 @@ class Trainer:
         # )
 
         self.scaler = GradScaler() #For AMP
-        self.criterion = nn.CrossEntropyLoss()  # Simple, fast loss
+        self.criterion = nn.CrossEntropyLoss(
+            label_smoothing=0.1,  # Helps with overfitting
+            ignore_index=-1       # For padding if needed
+        )  # Simple, fast loss
         # Wrap optimizer with gradient noise, but too heavy
         # self.optimizer = GradientNoiseOptimizer(optimizer, noise_std=0.01, decay=0.55)
         # Initialize focal loss, but too heavy
