@@ -3,7 +3,7 @@ import chess
 import numpy as np
 from typing import Optional
 
-from cnn.chess.components.cnn.chess_cnn_v3 import EnhancedChessCNNV3
+from cnn.chess.old.chess_cnn_v3 import EnhancedChessCNNV3
 from cnn.chess.components.cnn.chess_cnn_v5 import EnhancedChessCNNV5
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
 from cnn.chess.old.chess_cnn import EnhancedChessCNN

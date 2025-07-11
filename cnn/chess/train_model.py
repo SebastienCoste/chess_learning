@@ -17,8 +17,6 @@ import warnings
 import numpy as np
 from pl_bolts.utils.stability import UnderReviewWarning
 
-from cnn.chess.components.cnn.chess_cnn_v3 import EnhancedChessCNNV3
-from cnn.chess.components.cnn.chess_cnn_v4 import EnhancedChessCNNV4
 from cnn.chess.components.cnn.chess_cnn_v5 import EnhancedChessCNNV5
 from cnn.chess.components.trainer import Trainer
 
