@@ -9,7 +9,7 @@ TRAINING_CONFIG = {
     "board_size": 8,
     "batch_size": 512,  # To be adjusted. 128 is way too small5
     "num_workers": 10, #8 cores, 16 virtual workers
-    "version": "CNN6.0_TrainerReg1.3",
+    "version": "CNN6.0_TrainerReg1.4",
     "learning_rate": 0.001, #0.0003,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
     "scheduler_type": 'stabilized_cosine_annealing_warm_restarts',#'stabilized_cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'

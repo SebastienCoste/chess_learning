@@ -86,6 +86,8 @@ class SimpleChessEngine:
             if (board.turn == chess.WHITE and to_square >= 56) or (board.turn == chess.BLACK and to_square <= 7):
                 move = chess.Move(from_square, to_square, promotion=chess.QUEEN)
 
+        if not move in board.legal_moves:
+            print(f"AI (model) selects illegal move: {move}")
         return move if move in board.legal_moves else None
 
     def get_top_k_moves(self, board: chess.Board, k: int = 5) -> list:
@@ -146,24 +148,25 @@ class SimpleChessEngine:
                     logits = self.model(x)
                     probabilities = torch.softmax(logits, dim=1)
 
-            # Try top moves until we find a legal one
-            top_k_values, top_k_indices = torch.topk(probabilities, 10, dim=1)
+            # Gather probabilities for legal moves only
+            legal_moves = list(board.legal_moves)
+            legal_probs = []
+            legal_moves_filtered = []
+            for move in legal_moves:
+                idx = move.from_square * 64 + move.to_square
+                prob = probabilities[0, idx].item()
+                legal_probs.append(prob)
+                legal_moves_filtered.append(move)
 
-            for i in range(10):
-                move_idx = top_k_indices[0][i].item()
-                prob = top_k_values[0][i].item()
-                move = self.idx_to_move(move_idx, board)
+            if not legal_probs:
+                return self._get_random_move(board)
 
-                if move and move in board.legal_moves:
-                    print(f"AI (model) selects: {board.san(move)} (confidence: {prob:.3f})")
-                    return move
-                else:
-                    print(f"AI (model) selects: {move} (confidence: {prob:.3f}) Illegal move")
+            # Select the legal move with the highest probability
+            max_idx = legal_probs.index(max(legal_probs))
+            best_move = legal_moves_filtered[max_idx]
 
-
-            # If no top-10 moves are legal, fall back to random legal move
-            print("AI model's top predictions were illegal, selecting random legal move.")
-            return self._get_random_move(board)
+            print(f"AI (model) selects: {board.san(best_move)} (confidence: {legal_probs[max_idx]:.3f})")
+            return best_move
 
         except Exception as e:
             print(f"Error in model inference: {e}")
