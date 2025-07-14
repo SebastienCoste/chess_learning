@@ -38,7 +38,7 @@ from cnn.chess.components.training.model_validator import ModelValidator
 from cnn.chess.components.training.early_stopping import EarlyStopping
 
 
-class Trainer:
+class RegressionTrainer:
     """
     Enhanced trainer with comprehensive W&B integration, model summaries, and validation.
     """
@@ -84,7 +84,6 @@ class Trainer:
 
         # Log model architecture to W&B
         wandb.watch(self.model, log_freq=100, log="all")
-        self.scaler = GradScaler()  # Add this line for AMP
 
         if TRAINING_CONFIG["with_ema"]:
             self.ema = EMA(model, decay=0.999)
@@ -114,15 +113,15 @@ class Trainer:
         #     fused=True  # PyTorch 2.0+ fused optimizer
         # )
 
-        self.scaler = GradScaler() #For AMP
-        self.criterion = nn.CrossEntropyLoss(
-            label_smoothing=0.1,  # Helps with overfitting
-            ignore_index=-1       # For padding if needed
-        )  # Simple, fast loss
-        # Wrap optimizer with gradient noise, but too heavy
-        # self.optimizer = GradientNoiseOptimizer(optimizer, noise_std=0.01, decay=0.55)
-        # Initialize focal loss, but too heavy
-        # self.criterion = FocalLoss(alpha=0.25, gamma=2.0)
+        self.scaler = GradScaler(enabled=TRAINING_CONFIG["mixed_precision"]) #For AMP
+        if TRAINING_CONFIG["criterion"] == "smooth":
+            self.criterion =  nn.SmoothL1Loss() # alt: nn.MSELoss()  or nn.L1Loss() for MAE
+        elif TRAINING_CONFIG["criterion"] == "mse":
+            self.criterion =  nn.SmoothL1Loss() # alt: nn.MSELoss()  or nn.L1Loss() for MAE
+        elif TRAINING_CONFIG["criterion"] == "mae":
+            self.criterion =  nn.SmoothL1Loss() # alt: nn.MSELoss()  or nn.L1Loss() for MAE
+        elif TRAINING_CONFIG["criterion"] == "KLDiv":
+            self.criterion = nn.KLDivLoss(reduction='batchmean')
 
         # Learning rate scheduler
         if scheduler_type == 'exponential':
@@ -261,12 +260,13 @@ class Trainer:
             batch_start_time = time.time()
             total_data += len(data)
             data = data.cuda(non_blocking=True)
-            target = target.cuda(non_blocking=True).argmax(dim=1)  # Convert one-hot
+            # Regression: Keep target as continuous probabilities (don't apply argmax)
+            target = target.cuda(non_blocking=True).float()  # Ensure float type
             # Apply mixup augmentation, but too heavy
             if TRAINING_CONFIG["with_mixup"]:
                 data, targets_a, targets_b, lam = mixup_data(data, target, alpha=0.1)
             # Forward pass with AMP
-            with autocast(device_type='cuda', dtype=torch.float16):
+            with autocast(device_type='cuda', dtype=torch.float16, enabled=TRAINING_CONFIG["mixed_precision"]):
                 output = self.model(data)
                 # More precise? More complex
                 if TRAINING_CONFIG["with_mixup"]:
@@ -306,13 +306,13 @@ class Trainer:
                 if hasattr(self.dataset[cycle + 1], 'get_cache_stats'):
                     stats = self.dataset[cycle + 1].get_cache_stats()
                     print(
-                        f"Batch {batch_idx:5d} | Loss: {loss.item():.4f} | "
+                        f"Batch {batch_idx:5d} | Loss: {loss.item()} | "
                         f"Throughput: {throughput:.2f} samples/sec | "
                         f"Cache hit rate: {stats['hit_rate']:.2%} | "
                         f"Cache utilization: {stats['cache_size']}/{stats['capacity']} | "
                     )
                 else:
-                    print(f"Batch {batch_idx:5d} | Loss: {loss.item() * self.accumulation_steps:.4f} | "
+                    print(f"Batch {batch_idx:5d} | Loss: {loss.item() * self.accumulation_steps} | "
                         f"Throughput: {throughput:.2f} samples/sec")
 
                 self.batch_logger.log_batch_metrics(
@@ -344,9 +344,12 @@ class Trainer:
         with torch.no_grad():
             for data, target in self.val_loader:
                 data = data.cuda(non_blocking=True)
-                target = target.cuda(non_blocking=True).argmax(dim=1)
-                with autocast(device_type='cuda', dtype=torch.float16):
-                    output = self.model(data)
+                target = target.cuda(non_blocking=True).float()
+                with autocast(device_type='cuda', dtype=torch.float16, enabled=TRAINING_CONFIG["mixed_precision"]):
+                    if TRAINING_CONFIG["criterion"] == "KLDiv":
+                        output = torch.log(self.model(data))  # Log probabilities for KLDivLoss
+                    else:
+                        output = self.model(data)
                     loss = self.criterion(output, target)
                 total_loss += loss.item()
 
@@ -428,8 +431,8 @@ class Trainer:
 
 
                 print(f"📊 Epoch {epoch:3d}/{num_epochs}")
-                print(f"   • Train Loss: {train_loss:.6f}")
-                print(f"   • Val Loss:   {val_loss:.6f}")
+                print(f"   • Train Loss: {train_loss}")
+                print(f"   • Val Loss:   {val_loss}")
                 print(f"   • LR:         {current_lr:.2e}")
                 print(f"   • Duration:   {time.time() - start:.2f} seconds")
                 print("-" * 40)

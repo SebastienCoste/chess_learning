@@ -150,14 +150,14 @@ def main():
     if not model_path:
         model_path = input("Enter the path to your model file (e.g. chessMVLv3.pth): ").strip()
         if not model_path:
-            print("No model specified. Using models/chess_gm_puzzle_v4.1_cp1.pth.")
-            model_path = "./models/chess_gm_puzzle_CNN5.3_v8_sigmoid_final.pth"
+            print("No model specified. Using models/chess_gm_puzzle_CNN6.0_TrainerReg1.4_final.pth")
+            model_path = "./models/chess_gm_puzzle_CNN6.0_TrainerReg1.4_final.pth"
 
     
     # Initialize components
     board = chess.Board()
     display = EnhancedChessDisplay()
-    engine = SimpleChessEngine(model_path, version=5)
+    engine = SimpleChessEngine(model_path, version=1, prepare_for_regression=True)
     
     player_color = chess.WHITE if args.color == "white" else chess.BLACK
     

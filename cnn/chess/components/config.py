@@ -9,18 +9,20 @@ TRAINING_CONFIG = {
     "board_size": 8,
     "batch_size": 512,  # To be adjusted. 128 is way too small5
     "num_workers": 10, #8 cores, 16 virtual workers
-    "version": "CNN5.3_Trainer8.1_sigmoid",
-    "learning_rate": 0.0003,
+    "version": "CNN6.0_TrainerReg1.4",
+    "learning_rate": 0.001, #0.0003,
     "weight_decay": 1e-3, #increased from 1e-4 to fight overfitting
     "scheduler_type": 'stabilized_cosine_annealing_warm_restarts',#'stabilized_cosine_annealing_warm_restarts', #'cosine_annealing', #'reduce_on_plateau'
-    "early_stopping_patience": 5,
-    "mixed_precision": True,
+    "early_stopping_patience": 15,
+    "mixed_precision": False,
     "with_ema": False,
     "with_mixup": False,
-    "gradient_clipping": 0.5, #Reduced from 1.0 because of gradient instability
+    "gradient_clipping": 1, #Reduced from 1.0 because of gradient instability
     'accumulation_steps': 4,
     "pth_file": "chess_gm_puzzle",
     "cache_type": "none", # lru or shared
+    "criterion": "mse", # smooth, mse, mae, KLDiv
+    "is_regression": True,
     "config": {
             'input_channels': INPUT_CHANNEL,
             'board_size': 8,
@@ -68,6 +70,13 @@ cache -> shared                 : failing, leaky memory
 cache -> none                   : 9000 (!!!...!!!) (cache was a waste of time ^^) 
 pin_memory -> True, prefetch 2  : 
 shuffle train -> True           : 
+
+
+CNN6.0_TrainerReg1.2:
+MSE, no GradScaler, no mixed precision, no sigmoid at the end of forward
+learning rate 0.0003 -> 0.001
+gradient clipping 0.5 -> 1
+
 '''
 
 

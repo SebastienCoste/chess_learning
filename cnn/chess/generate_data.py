@@ -30,11 +30,13 @@ class ChessTrainingDataGenerator:
 
     def __init__(self,
                  #min_elo: int = 2000,
+                 prepare_for_regression: bool = True,
                  skip_opening_moves: int = 6,
                  #skip_endgame_moves: int = 10
                  ):
         #self.min_elo = min_elo
         self.skip_opening_moves = skip_opening_moves
+        self.prepare_for_regression = prepare_for_regression
         # self.skip_endgame_moves = skip_endgame_moves
 
 
@@ -81,7 +83,13 @@ class ChessTrainingDataGenerator:
                 # Create one-hot output vector
                 output_vector = np.zeros(4096, dtype=np.float32)
                 move_index = self.move_to_index(move)
-                output_vector[move_index] = 1.0
+                output_vector[move_index] = 0.8 if self.prepare_for_regression else 1.0
+                if self.prepare_for_regression:
+                    legal_moves = list(board.legal_moves)
+                    for legal_move in legal_moves:
+                        legal_idx = self.move_to_index(legal_move)
+                        if legal_idx != move_index:
+                            output_vector[legal_idx] = 0.2 / (len(legal_moves) - 1)
 
                 # Store training example
                 training_data.append({
@@ -251,8 +259,9 @@ def build_ios(file, pos, shape):
 
 # Example usage
 if __name__ == "__main__":
+    prepare_for_regression = True #Regression is listing all legal moves + higher score on best move, classification is listing only the good move
     # Sample master game
-    mmap_filename = "data/all_train_data_with_puzzles_v3"
+    mmap_filename = f"data/all_train_data_with_puzzles_{"_reg" if prepare_for_regression else ""}v4"
     max_games = 1_700_000
     first_chunk_size = int(1024 * 1024 * 3.18) #first chunk is used as validation
     next_chunk_size = int(1024 * 1024 * 3.18) #Overshoot a bit to avoid small batches
@@ -266,7 +275,7 @@ if __name__ == "__main__":
     random.shuffle(games)
     print("shuffled games")
     # Process the game
-    generator = ChessTrainingDataGenerator()
+    generator = ChessTrainingDataGenerator(prepare_for_regression)
     inputs_mmap, outputs_mmap, metadata = build_ios(mmap_filename, current_split, first_chunk_size)
     chunk_size = first_chunk_size
     idx = 0

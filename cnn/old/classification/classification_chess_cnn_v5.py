@@ -25,7 +25,7 @@ def get_activation_function(activation_name='gelu'):
     }
     return activations.get(activation_name.lower(), lambda: nn.GELU())
 
-class EnhancedChessCNNV5(nn.Module):
+class ClassificationChessCNNv5(nn.Module):
     """
     Enhanced Convolutional Neural Network for chess move prediction.
     Incorporates residual connections, modern activations, attention mechanisms,
@@ -44,7 +44,7 @@ class EnhancedChessCNNV5(nn.Module):
             transformer_heads=8,
             kernel_size = TRAINING_CONFIG["kernel_size"],
     ):
-        super(EnhancedChessCNNV5    , self).__init__()
+        super(ClassificationChessCNNv5, self).__init__()
         self.device = torch.device('cuda' if TRAINING_CONFIG["device"] == "cuda" and torch.cuda.is_available() else 'cpu')
         self.to(self.device)  # Move entire model to CUDA immediately
         print(f"EnhancedChessCNN is initialized using device {self.device}")

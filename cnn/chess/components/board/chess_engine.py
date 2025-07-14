@@ -3,17 +3,19 @@ import chess
 import numpy as np
 from typing import Optional
 
-from cnn.chess.old.chess_cnn_v3 import EnhancedChessCNNV3
-from cnn.chess.components.cnn.chess_cnn_v5 import EnhancedChessCNNV5
+from cnn.old.chess_cnn_v3 import EnhancedChessCNNV3
+from cnn.old.classification.classification_chess_cnn_v5 import ClassificationChessCNNv5
+from cnn.chess.components.cnn.regression_chess_cnn_v1 import RegressionChessCNNv1
 from cnn.chess.components.utils.chess_board_utils import board_to_tensor
-from cnn.chess.old.chess_cnn import EnhancedChessCNN
-from cnn.chess.old.chess_cnn_v2 import EnhancedChessCNNV2
+from cnn.old.chess_cnn import EnhancedChessCNN
+from cnn.old.chess_cnn_v2 import EnhancedChessCNNV2
 from cnn.chess.components.config import TRAINING_CONFIG
 
 
 class SimpleChessEngine:
-    def __init__(self, model_path=None, version = 2):
+    def __init__(self, model_path=None, version = 2, prepare_for_regression: bool = False):
         self.model_path = model_path
+        self.prepare_for_regression = prepare_for_regression
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if model_path:
@@ -25,11 +27,14 @@ class SimpleChessEngine:
                 if version == 2:
                     self.model = (EnhancedChessCNNV2(**TRAINING_CONFIG["config"]))
                 elif version == 1:
-                    self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
+                    if self.prepare_for_regression:
+                        self.model = RegressionChessCNNv1(**TRAINING_CONFIG["config"])
+                    else:
+                        self.model = EnhancedChessCNN(**TRAINING_CONFIG["config"])
                 elif version == 3:
                     self.model = EnhancedChessCNNV3(**TRAINING_CONFIG["config"])
                 elif version == 5:
-                    self.model = EnhancedChessCNNV5(**TRAINING_CONFIG["config"])
+                    self.model = ClassificationChessCNNv5(**TRAINING_CONFIG["config"])
                 else:
                     raise ValueError("Invalid version")
 
@@ -81,6 +86,8 @@ class SimpleChessEngine:
             if (board.turn == chess.WHITE and to_square >= 56) or (board.turn == chess.BLACK and to_square <= 7):
                 move = chess.Move(from_square, to_square, promotion=chess.QUEEN)
 
+        if not move in board.legal_moves:
+            print(f"AI (model) selects illegal move: {move}")
         return move if move in board.legal_moves else None
 
     def get_top_k_moves(self, board: chess.Board, k: int = 5) -> list:
@@ -135,27 +142,31 @@ class SimpleChessEngine:
             elif len(x.shape) == 3:  # If it's [channels, height, width]
                 x = x.unsqueeze(0)  # Make it [1, channels, height, width]
             with torch.no_grad():
-                logits = self.model(x)
-                probabilities = torch.softmax(logits, dim=1)
-
-            # Try top moves until we find a legal one
-            top_k_values, top_k_indices = torch.topk(probabilities, 10, dim=1)
-
-            for i in range(10):
-                move_idx = top_k_indices[0][i].item()
-                prob = top_k_values[0][i].item()
-                move = self.idx_to_move(move_idx, board)
-
-                if move and move in board.legal_moves:
-                    print(f"AI (model) selects: {board.san(move)} (confidence: {prob:.3f})")
-                    return move
+                if self.prepare_for_regression:
+                    probabilities = self.model(x)  # Already probabilities from sigmoid
                 else:
-                    print(f"AI (model) selects: {move} (confidence: {prob:.3f}) Illegal move")
+                    logits = self.model(x)
+                    probabilities = torch.softmax(logits, dim=1)
 
+            # Gather probabilities for legal moves only
+            legal_moves = list(board.legal_moves)
+            legal_probs = []
+            legal_moves_filtered = []
+            for move in legal_moves:
+                idx = move.from_square * 64 + move.to_square
+                prob = probabilities[0, idx].item()
+                legal_probs.append(prob)
+                legal_moves_filtered.append(move)
 
-            # If no top-10 moves are legal, fall back to random legal move
-            print("AI model's top predictions were illegal, selecting random legal move.")
-            return self._get_random_move(board)
+            if not legal_probs:
+                return self._get_random_move(board)
+
+            # Select the legal move with the highest probability
+            max_idx = legal_probs.index(max(legal_probs))
+            best_move = legal_moves_filtered[max_idx]
+
+            print(f"AI (model) selects: {board.san(best_move)} (confidence: {legal_probs[max_idx]:.3f})")
+            return best_move
 
         except Exception as e:
             print(f"Error in model inference: {e}")
