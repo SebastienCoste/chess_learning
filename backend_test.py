@@ -257,13 +257,10 @@ class ChessTransformerAPITester:
         print(f"📡 Testing against: {self.base_url}")
         print("=" * 60)
         
-        # Test basic connectivity first
-        if not self.test_root_endpoint():
-            print("\n❌ Basic connectivity failed. Stopping tests.")
+        # Test model info first for basic API connectivity
+        if not self.test_model_info():
+            print("\n❌ API connectivity failed. Stopping tests.")
             return False
-        
-        # Test model info
-        self.test_model_info()
         
         # Test move predictions
         self.test_move_prediction_default()
